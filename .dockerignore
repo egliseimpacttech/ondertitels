@@ -1,0 +1,10 @@
+uploads/
+output/
+library/
+__pycache__/
+.venv/
+.git/
+.cursor/
+.aws/
+*.log
+

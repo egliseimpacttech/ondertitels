@@ -1,0 +1,30 @@
+# Backend
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+
+# Transcription
+elevenlabs>=1.0.0
+
+# Translation
+deepl>=1.16.0
+openai>=1.65.0
+
+# Env
+python-dotenv>=1.0.0
+
+# Storage (Cloud Run large uploads)
+google-cloud-storage>=2.14.0
+
+# Rate limiting
+slowapi>=0.1.9
+
+# Auth (Firebase magic link)
+firebase-admin>=6.0.0
+
+# Testing
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+
+# Video download/conversion
+yt-dlp

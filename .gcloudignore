@@ -1,0 +1,18 @@
+# Exclude large/ephemeral folders from Cloud Build source upload
+uploads/
+output/
+library/
+
+# Logs / caches
+*.log
+.cursor/
+.cursor-sandbox/
+__pycache__/
+
+# Local env/secrets
+.env
+.env.*
+
+# Git metadata
+.git/
+

@@ -1,0 +1,2 @@
+/* Single source: backend serves full rules at GET /design.css (frontend/design.css). */
+@import url("/design.css");

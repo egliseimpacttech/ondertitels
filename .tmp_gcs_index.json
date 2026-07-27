@@ -1,0 +1,67 @@
+{
+  "folders": {},
+  "files": {
+    "f9e4f51c-d27b-47a0-8ab4-8053bbbce91a": {
+      "name": "7afe1e92-ffab-4482-b96e-70f18d9c062b.mp4",
+      "type": "video",
+      "folder": "",
+      "size": 1485319524,
+      "cinema_public": true,
+      "cinema_title": "The power of a mindset shift to achieve a holistic breakthrough.",
+      "cinema_description": "A spiritual transformation begins with a single shift — the mind.  \r\nIn this powerful four‑part series, a passionate preacher exposes the hidden forces that keep believers trapped in old patterns, spiritual stagnation, and the “prison of the past.” Through bold teaching, prophetic insight, and raw honesty, he reveals how a renewed mindset becomes the gateway to a holistic breakthrough in every area of life.\r\n\r\nAs he challenges Christians to confront worldly mentalities, embrace “positive solitude,” and reclaim their identity as citizens of the Kingdom, the message grows more urgent. Technology, culture, and modern distractions are unmasked as subtle forces shaping the soul — unless the believer fights back.\r\n\r\nWith moments of intensity, vulnerability, and communal declaration, this series invites viewers to rethink everything they believe about spiritual growth.\r\nA journey of inner warfare, renewed identity, and radical transformation begins here.",
+      "cinema_cover_type": "frame",
+      "cinema_cover_second": 0.5,
+      "cinema_subtitles": {
+        "en": "9f8a54d7-9c59-472c-a244-3661e94cb6ce"
+      }
+    },
+    "9f8a54d7-9c59-472c-a244-3661e94cb6ce": {
+      "name": "holistic_Eng.vtt",
+      "type": "vtt",
+      "folder": "",
+      "size": 94172
+    },
+    "1c61b08b-fb41-435c-8682-3fe0e77fe386": {
+      "name": "transcription_test_fr.vtt",
+      "type": "vtt",
+      "folder": "",
+      "size": 7010
+    },
+    "2ffa7a2c-8b3b-4faa-90f5-1fdf51a68594": {
+      "name": "extractie_FR.vtt",
+      "type": "vtt",
+      "folder": "",
+      "size": 7036
+    },
+    "213cd7fe-7ee1-4ebd-a766-ba87d61b24b3": {
+      "name": "subtitles.vtt",
+      "type": "vtt",
+      "folder": "",
+      "size": 94172
+    },
+    "5413f186-e595-4759-b0bb-4965aa858103": {
+      "name": "subtitles_spanish.vtt",
+      "type": "vtt",
+      "folder": "",
+      "size": 6846
+    },
+    "091981d2-3902-493d-83f7-fe3722e2ff77": {
+      "name": "transcription.vtt",
+      "type": "vtt",
+      "folder": "",
+      "size": 101492
+    },
+    "e707d622-a447-46d5-9255-3f604b9d9dd2": {
+      "name": "transcription_holistiquement.vtt",
+      "type": "vtt",
+      "folder": "",
+      "size": 99084
+    },
+    "05a953a7-a786-4e7b-b4aa-82295073081c": {
+      "name": "05a953a7-a786-4e7b-b4aa-82295073081c.mp4",
+      "type": "video",
+      "folder": "",
+      "size": 1485319524
+    }
+  }
+}

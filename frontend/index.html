@@ -1,0 +1,408 @@
+﻿<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sous-titres automatiques</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/png" href="/brand-logo.png">
+  <link rel="stylesheet" href="design.css">  
+</head>
+<body>
+  <div id="startupPreload" class="startup-preload" aria-live="polite" aria-busy="true">
+    <div class="startup-preload-inner">
+      <div class="startup-spinner" aria-hidden="true"></div>
+      <div class="startup-preload-text">Chargement de l'application…</div>
+    </div>
+  </div>
+
+  <div class="container container--auth" id="authGate" style="display:none;">
+    <div class="section auth-gate-section">
+      <div class="auth-gate-grid">
+        <div class="auth-column auth-column--login">
+          <div class="section-header">Connexion</div>
+          <p class="auth-column-hint">Vous avez déjà un compte ? Saisissez votre e-mail et votre mot de passe.</p>
+          <label>E-mail
+            <input type="text" id="authLoginEmail" autocomplete="username" placeholder="nom@exemple.com">
+          </label>
+          <label>Mot de passe
+            <input type="password" id="authLoginPassword" autocomplete="current-password" placeholder="••••••••">
+          </label>
+          <button type="button" id="authPasswordSignInBtn">Se connecter</button>
+        </div>
+        <div class="auth-column auth-column--register">
+          <div class="section-header">Créer un compte</div>
+          <p class="auth-column-hint">Nouveau ? Choisissez un e-mail et un mot de passe (min. 6 caractères).</p>
+          <label>E-mail
+            <input type="text" id="authRegisterEmail" autocomplete="email" placeholder="nom@exemple.com">
+          </label>
+          <label>Mot de passe
+            <input type="password" id="authRegisterPassword" autocomplete="new-password" placeholder="••••••••">
+          </label>
+          <button type="button" class="secondary" id="authPasswordSignUpBtn">Créer mon compte</button>
+        </div>
+      </div>
+      <div id="authMsg" class="result auth-gate-msg"></div>
+    </div>
+  </div>
+
+  <div class="container" id="appWrap" style="display:none;">
+    <!-- Header with menu -->
+    <div class="header">
+      <h1>Sous-titres automatiques</h1>
+      <div class="menu-wrap">
+        <button class="menu-btn" id="menuBtn">
+          <div class="menu-icon"><span></span><span></span><span></span></div>
+          Menu
+        </button>
+        <div class="menu-dropdown" id="menuDropdown">
+          <a class="menu-item active" href="/accueil" data-view="home">Accueil</a>
+          <a class="menu-item" href="/cinema" data-view="cinema">Cinéma</a>
+          <a class="menu-item" href="/workspace" data-view="workspace">Espace de travail</a>
+          <a class="menu-item" href="/bibliotheque" data-view="library">Bibliothèque</a>
+          <a class="menu-item" href="/administration" data-view="admin">Administration</a>
+          <div class="menu-item" data-action="signout">Déconnexion</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- HOME VIEW -->
+    <div id="homeView" class="view active">
+      <!-- Quick upload to Library -->
+      <div class="section">
+        <div class="section-header">Envoyer vers la bibliothèque</div>
+        <p>Choisissez d’abord un fichier, puis cliquez sur envoyer. Le fichier est enregistré directement dans votre bibliothèque.</p>
+        <label>Nom de fichier facultatif (un seul fichier)</label>
+        <input type="text" id="homeUploadFilename" placeholder="ex. sermon_01.mp4">
+        <label style="margin-top: 12px;">Fichier</label>
+        <div class="file-source">
+          <input type="file" id="homeUploadInput" accept=".vtt,.txt,.mp3,.mp4,.wav" style="display:none;">
+          <button type="button" class="secondary small" id="homeChooseFileBtn">Choisir un fichier</button>
+          <button type="button" id="homeUploadBtn">Envoyer vers la bibliothèque</button>
+          <div class="file-source-info" id="homeUploadInfo">Aucun fichier sélectionné</div>
+        </div>
+        <div id="homeUploadResult" class="result"></div>
+      </div>
+
+      <!-- Transcription: VTT or TXT -->
+      <div class="section">
+        <div class="section-header">Transcription</div>
+        <p>Téléversez un fichier audio ou vidéo (.mp3, .mp4, .wav). Indiquez si vous voulez des sous-titres horodatés (VTT) ou un texte continu (TXT).</p>
+        <form id="transcribeForm">
+          <fieldset class="transcribe-output-fieldset">
+            <legend>Format de sortie</legend>
+            <label class="transcribe-output-option"><input type="radio" name="transcribeOutput" value="vtt" checked> Sous-titres (VTT, avec horodatage)</label>
+            <label class="transcribe-output-option"><input type="radio" name="transcribeOutput" value="txt"> Texte (TXT, sans horodatage)</label>
+          </fieldset>
+          <label>Fichier audio ou vidéo</label>
+          <div class="file-source">
+            <input type="file" id="transcribeFileInput" accept=".mp4,.mp3,.wav" style="display:none;">
+            <button type="button" class="secondary small" onclick="document.getElementById('transcribeFileInput').click()">Depuis l’ordinateur</button>
+            <button type="button" class="secondary small" onclick="openLibPicker('transcribe', 'audio,video')">Depuis la bibliothèque</button>
+            <div class="file-source-info" id="transcribeFileInfo">Aucun fichier sélectionné</div>
+          </div>
+          <label style="margin-top: 12px;">
+            <input type="checkbox" id="transcribeIsolateVoice">
+            Isolateur de voix (facultatif) — isoler la voix principale, réduire le bruit de fond / la fuite d’interprète
+          </label>
+          <button type="submit" id="transcribeBtn">Lancer la transcription</button>
+        </form>
+        <div id="transcribeResult" class="result"></div>
+      </div>
+
+      <!-- STEP 2: Translate VTT / TXT -->
+      <div class="section">
+        <div class="section-header">Traduire</div>
+        <p>Téléversez un fichier VTT ou TXT et choisissez les langues cibles. Pour un TXT, séparez les paragraphes par une ligne vide ; plusieurs langues produisent un fichier avec une section par langue.</p>
+        <form id="translateForm">
+          <label>Fichier VTT ou TXT</label>
+          <div class="file-source">
+            <input type="file" id="translateFileInput" accept=".vtt,.txt" style="display:none;">
+            <button type="button" class="secondary small" onclick="document.getElementById('translateFileInput').click()">Depuis l’ordinateur</button>
+            <button type="button" class="secondary small" onclick="openLibPicker('translate', 'vtt,text')">Depuis la bibliothèque</button>
+            <div class="file-source-info" id="translateFileInfo">Aucun fichier sélectionné</div>
+          </div>
+          <fieldset>
+            <legend>Langues cibles</legend>
+            <div class="lang-grid">
+              <label><input type="checkbox" name="lang" value="nl"> Néerlandais</label>
+              <label><input type="checkbox" name="lang" value="en"> Anglais</label>
+              <label><input type="checkbox" name="lang" value="es"> Espagnol</label>
+              <label><input type="checkbox" name="lang" value="fr"> Français</label>
+              <label><input type="checkbox" name="lang" value="mg"> Malgache</label>
+              <label><input type="checkbox" name="lang" value="kg"> Kikongo</label>
+              <label><input type="checkbox" name="lang" value="ts"> Tshiluba</label>
+              <label><input type="checkbox" name="lang" value="ln"> Lingala</label>
+              <label><input type="checkbox" name="lang" value="pt"> Portugais</label>
+              <label><input type="checkbox" name="lang" value="zh"> Chinois</label>
+              <label><input type="checkbox" name="lang" value="sw"> Swahili</label>
+            </div>
+          </fieldset>
+          <button type="submit" id="translateBtn">Traduire</button>
+        </form>
+        <div id="translateResult" class="result"></div>
+      </div>
+
+      <!-- STEP 3: TXT/VTT to speech -->
+      <div class="section">
+        <div class="section-header">Voix (TXT / VTT → audio)</div>
+        <p>Convertissez un fichier TXT ou VTT en fichiers audio MP3 avec les voix serveur ElevenLabs.</p>
+        <form id="ttsForm">
+          <label>Fichier TXT ou VTT</label>
+          <div class="file-source">
+            <input type="file" id="ttsFileInput" accept=".vtt,.txt" style="display:none;">
+            <button type="button" class="secondary small" onclick="document.getElementById('ttsFileInput').click()">Depuis l’ordinateur</button>
+            <button type="button" class="secondary small" onclick="openLibPicker('tts', 'vtt,text')">Depuis la bibliothèque</button>
+            <div class="file-source-info" id="ttsFileInfo">Aucun fichier sélectionné</div>
+          </div>
+          <fieldset>
+            <legend>Langue audio (1 seule)</legend>
+            <div class="lang-grid">
+              <label><input type="radio" name="ttsLang" value="nl"> Néerlandais</label>
+              <label><input type="radio" name="ttsLang" value="en" checked> Anglais</label>
+              <label><input type="radio" name="ttsLang" value="es"> Espagnol</label>
+              <label><input type="radio" name="ttsLang" value="fr"> Français</label>
+              <label><input type="radio" name="ttsLang" value="mg"> Malgache</label>
+              <label><input type="radio" name="ttsLang" value="kg"> Kikongo</label>
+              <label><input type="radio" name="ttsLang" value="ts"> Tshiluba</label>
+              <label><input type="radio" name="ttsLang" value="ln"> Lingala</label>
+              <label><input type="radio" name="ttsLang" value="pt"> Portugais</label>
+              <label><input type="radio" name="ttsLang" value="zh"> Chinois</label>
+              <label><input type="radio" name="ttsLang" value="sw"> Swahili</label>
+            </div>
+          </fieldset>
+          <button type="submit" id="ttsBtn">Générer l'audio</button>
+        </form>
+        <div id="ttsResult" class="result"></div>
+      </div>
+
+      <!-- Burn into video -->
+      <div class="section">
+        <div class="section-header">Incrustation dans la vidéo</div>
+        <p>Intégrez vos sous-titres VTT dans la vidéo. Vous obtenez un fichier MP4 avec les sous-titres gravés dans l’image.</p>
+        <form id="burnForm">
+          <label>Fichier vidéo (MP4, WebM, MKV)</label>
+          <div class="file-source">
+            <input type="file" id="burnVideoInput" accept=".mp4,.webm,.mkv" style="display:none;">
+            <button type="button" class="secondary small" onclick="document.getElementById('burnVideoInput').click()">Depuis l’ordinateur</button>
+            <button type="button" class="secondary small" onclick="openLibPicker('burnVideo', 'video')">Depuis la bibliothèque</button>
+            <div class="file-source-info" id="burnVideoInfo">Aucune vidéo sélectionnée</div>
+          </div>
+          <label>Fichier de sous-titres (VTT)</label>
+          <div class="file-source">
+            <input type="file" id="burnVttInput" accept=".vtt" style="display:none;">
+            <button type="button" class="secondary small" onclick="document.getElementById('burnVttInput').click()">Depuis l’ordinateur</button>
+            <button type="button" class="secondary small" onclick="openLibPicker('burnVtt', 'vtt')">Depuis la bibliothèque</button>
+            <div class="file-source-info" id="burnVttInfo">Aucun VTT sélectionné</div>
+          </div>
+          <button type="submit" id="burnBtn">Incruster dans la vidéo</button>
+        </form>
+        <div id="burnResult" class="result"></div>
+      </div>
+    </div>
+
+    <!-- CINEMA VIEW (Netflix-style layout built in JS) -->
+    <div id="cinemaView" class="view">
+      <div id="cinemaContent">
+        <div class="cinema-loading-msg" id="cinemaLoading">Chargement du Cinéma…</div>
+      </div>
+    </div>
+
+    <!-- WORKSPACE VIEW -->
+    <div id="workspaceView" class="view">
+      <h2>Espace de travail</h2>
+      <p>Téléversez la vidéo et un fichier VTT ou TXT : l’aperçu des sous-titres sur la vidéo se met à jour automatiquement pour les fichiers .vtt.</p>
+      
+      <div class="workspace-grid">
+        <!-- LEFT: video preview -->
+        <div class="workspace-left">
+          <div class="toolbar">
+            <div class="file-source" style="margin-top: 0;">
+              <label style="margin: 0;">
+                <input type="file" id="workspaceVideoInput" accept=".mp4,.webm,.mkv" style="display: none;">
+                <button type="button" class="secondary small" onclick="document.getElementById('workspaceVideoInput').click()">Depuis l’ordinateur</button>
+              </label>
+              <button type="button" class="secondary small" onclick="openLibPicker('workspaceVideo', 'video')">Depuis la bibliothèque</button>
+            </div>
+          </div>
+          <video id="workspaceVideo" controls></video>
+          <div class="file-source-info" id="workspaceVideoInfo">Aucune vidéo sélectionnée</div>
+        </div>
+
+        <!-- RIGHT: text editor (VTT / TXT) -->
+        <div class="workspace-right">
+          <div class="toolbar">
+            <div class="file-source" style="margin-top: 0;">
+              <label style="margin: 0;">
+                <input type="file" id="workspaceFileInput" accept=".vtt,.txt" style="display: none;">
+                <button type="button" class="secondary small" onclick="document.getElementById('workspaceFileInput').click()">Depuis l’ordinateur</button>
+              </label>
+              <button type="button" class="secondary small" onclick="openLibPicker('workspaceText', 'vtt,text')">Depuis la bibliothèque</button>
+              <button type="button" class="secondary" id="workspaceClearBtn">Effacer</button>
+            </div>
+          </div>
+          
+          <label style="margin-top: 0;">
+            Nom du fichier
+            <input type="text" id="workspaceFilename" value="subtitles.vtt">
+          </label>
+
+          <label>
+            Dossier cible (bibliothèque)
+            <select id="workspaceTargetFolder" style="margin-top:4px; padding:8px 12px; border:1px solid #000; width:100%; font-family:inherit;">
+              <option value="">Racine</option>
+            </select>
+          </label>
+          
+          <label>
+            Contenu
+            <textarea id="workspaceEditor" rows="20" placeholder="Fichier .vtt : WEBVTT, plages de temps et texte. Fichier .txt : texte libre."></textarea>
+          </label>
+          
+          <button type="button" id="workspaceDownloadBtn">Télécharger le fichier</button>
+          <button type="button" class="secondary" id="workspaceSaveToLibraryBtn">Enregistrer dans la bibliothèque</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- LIBRARY VIEW -->
+    <div id="libraryView" class="view">
+      <h2>Bibliothèque</h2>
+      <p>Stockez et organisez vos fichiers (VTT, MP3, MP4).</p>
+      
+      <div class="toolbar">
+        <button type="button" class="secondary" id="libNewFolderBtn">Nouveau dossier</button>
+        <input type="text" id="libUploadFilename" placeholder="Nom facultatif pour un seul fichier (ex. sermon_01.mp4)" style="padding:8px 12px; border:1px solid #000; font-family:inherit; min-width:320px;">
+        <label style="margin: 0;">
+          <input type="file" id="libUploadInput" accept=".vtt,.txt,.mp3,.mp4,.wav" style="display: none;" multiple>
+          <button type="button" class="secondary" onclick="document.getElementById('libUploadInput').click()">Téléverser des fichiers</button>
+        </label>
+      </div>
+      <p class="lib-dnd-hint">Glisser-déposer : maintenez le clic sur une ligne de <strong>fichier</strong>, puis déposez sur un <strong>dossier</strong> ou sur un chemin du fil d’Ariane (Racine / …).</p>
+      
+      <div class="breadcrumb" id="libBreadcrumb"></div>
+      <div class="file-list" id="libFileList"></div>
+    </div>
+
+    <!-- ADMIN VIEW -->
+    <div id="adminView" class="view">
+      <h2>Administration</h2>
+      <p>Créez des comptes et partagez un lien de réinitialisation du mot de passe (« option 2 »).</p>
+      <div class="section">
+        <div class="section-header">Inviter un utilisateur</div>
+        <label>E-mail de l’utilisateur
+          <input type="text" id="adminInviteEmail" placeholder="utilisateur@exemple.com">
+        </label>
+        <button type="button" id="adminInviteBtn">Générer le lien de réinitialisation</button>
+        <div id="adminInviteResult" class="result"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal for new folder -->
+  <div class="modal-overlay" id="folderModal">
+    <div class="modal">
+      <h3>Nouveau dossier</h3>
+      <label>Nom du dossier
+        <input type="text" id="folderNameInput" placeholder="Mon dossier">
+      </label>
+      <label id="folderEmailsLabel" style="display:none;">Adresses e-mail autorisées (optionnel, séparées par des virgules)
+        <input type="text" id="folderEmailsInput" placeholder="email1@example.com, email2@example.com">
+      </label>
+      <div class="modal-actions">
+        <button type="button" id="folderCreateBtn">Créer</button>
+        <button type="button" class="secondary" id="folderCancelBtn">Annuler</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal for library file picker -->
+  <div class="modal-overlay" id="libPickerModal">
+    <div class="modal" style="min-width: 400px;">
+      <h3>Choisir un fichier dans la bibliothèque</h3>
+      <div class="lib-picker-breadcrumb" id="libPickerBreadcrumb"></div>
+      <div class="lib-picker-list" id="libPickerList"></div>
+      <div class="modal-actions">
+        <button type="button" id="libPickerSelectBtn" disabled>Sélectionner</button>
+        <button type="button" class="secondary" id="libPickerCancelBtn">Annuler</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cinema: publish / update from Library -->
+  <div class="modal-overlay" id="cinemaPublishModal">
+    <div class="modal cinema-modal-dark">
+      <h3 style="margin-top:0;">Publier sur le Cinéma</h3>
+      <input type="hidden" id="cinemaPublishFileId" value="">
+      <input type="hidden" id="cinemaPublishFileType" value="video">
+      <label>Titre
+        <input type="text" id="cinemaPublishTitle" placeholder="Titre">
+      </label>
+      <label>Description
+        <textarea id="cinemaPublishDesc" rows="4" placeholder="Description (facultatif)"></textarea>
+      </label>
+      <label>Couverture
+        <select id="cinemaCoverType">
+          <option value="frame">Image extraite de la vidéo à la seconde…</option>
+          <option value="upload">Téléverser une image (JPEG/PNG)</option>
+        </select>
+      </label>
+      <label id="cinemaCoverWrapSecond">Seconde dans la vidéo
+        <input type="number" id="cinemaCoverSecond" min="0" step="0.1" value="0">
+      </label>
+      <label id="cinemaCoverWrapFile" style="display:none;">Image de couverture
+        <input type="file" id="cinemaCoverFile" accept="image/*">
+      </label>
+      <div id="cinemaSubtitleSection">
+        <div class="section-header" style="margin-top:16px;font-size:0.95rem;">Sous-titres (VTT par langue)</div>
+        <div id="cinemaSubtitleRows"></div>
+      </div>
+      <div class="modal-actions" style="flex-wrap:wrap;">
+        <button type="button" id="cinemaPublishSaveBtn">Enregistrer et publier</button>
+        <button type="button" class="secondary" id="cinemaPublishUnpublishBtn">Retirer du Cinéma</button>
+        <button type="button" class="secondary" id="cinemaPublishCancelBtn">Annuler</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="cinemaDetailModal">
+    <div class="modal cinema-modal-dark cinema-detail-popup-shell" style="max-width:480px;">
+      <button type="button" class="secondary cinema-detail-close-float" id="cinemaDetailCloseBtn">✕</button>
+      <div class="cinema-detail-media-wrap">
+        <div id="cinemaDetailPosterLayer" class="cinema-detail-poster-layer">
+          <img id="cinemaDetailPosterImg" alt="" style="display:none;">
+          <div id="cinemaDetailPosterEmpty" class="cinema-detail-poster-empty" style="display:none;"></div>
+          <button type="button" id="cinemaDetailPlayHit" class="cinema-detail-play-hit" aria-label="Lire la vidéo">
+            <span class="cinema-detail-play-icon"></span>
+          </button>
+        </div>
+        <video id="cinemaDetailInlinePlayer" class="cinema-detail-video-hidden" controls playsinline preload="metadata"></video>
+        <audio id="cinemaDetailAudioPlayer" class="cinema-detail-audio-hidden" controls preload="metadata"></audio>
+      </div>
+      <h3 id="cinemaDetailTitle" class="cinema-detail-modal-title"></h3>
+      <p id="cinemaDetailDesc" class="cinema-detail-modal-desc"></p>
+      <label id="cinemaDetailLangWrap" class="cinema-detail-lang-label">Langue des sous-titres
+        <select id="cinemaDetailLang"></select>
+      </label>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="libraryVideoModal">
+    <div class="modal" style="max-width: min(720px, 96vw);">
+      <button type="button" class="secondary" id="libraryVideoModalClose" style="float:right;margin:0;">✕</button>
+      <h3 id="libraryVideoModalTitle" style="margin-top:0;"></h3>
+      <video id="libraryVideoPlayer" controls playsinline preload="metadata" style="width:100%;max-height:70vh;background:#000;"></video>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
+
+
+
+
+
+
