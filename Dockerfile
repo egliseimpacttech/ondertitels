@@ -1,3 +1,10 @@
+FROM node:22-alpine AS frontend-build
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
 FROM python:3.11-slim
 
 # FFmpeg is required for:
@@ -17,6 +24,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend ./backend
 COPY frontend ./frontend
 COPY static ./static
+COPY --from=frontend-build /web/dist ./web/dist
 
 # Runtime dirs (so the backend can write files)
 RUN mkdir -p uploads output library
@@ -29,4 +37,3 @@ ENV PORT=8080
 EXPOSE 8080
 
 CMD ["sh", "-c", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT}"]
-

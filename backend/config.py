@@ -6,17 +6,18 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Determine environment
-ENV = os.getenv("ENV", "local").lower()
-
-# Load base .env first, then environment-specific config
-load_dotenv()  # Load .env
-env_config = Path(__file__).resolve().parent.parent / "config" / f"{ENV}.env"
-if env_config.exists():
-    load_dotenv(env_config)
-
-# Paths
+# Paths first so .env always loads from the project root (not dependent on cwd).
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load base .env, then optional environment-specific override.
+load_dotenv(BASE_DIR / ".env")
+_env_hint = (os.getenv("ENV", "local") or "local").lower()
+_env_config = BASE_DIR / "config" / f"{_env_hint}.env"
+if _env_config.exists():
+    load_dotenv(_env_config, override=True)
+
+ENV = (os.getenv("ENV", "local") or "local").lower()
+
 UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR = BASE_DIR / "output"
@@ -29,6 +30,40 @@ ELEVENLABS_TTS_API_KEY = (os.getenv("ELEVENLABS_TTS_API_KEY", "") or "").strip()
 VOICE_ISOLATION_API_KEY = os.getenv("VOICE_ISOLATION_API_KEY", "")
 DEEPL_API_KEY = os.getenv("DEEPL_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+# Hugging Face Inference (live ASR). Accepts HF_TOKEN or HUGGINGFACE_API_TOKEN.
+HUGGINGFACE_API_TOKEN = (
+    (os.getenv("HUGGINGFACE_API_TOKEN", "") or os.getenv("HF_TOKEN", "") or "").strip()
+)
+# Default: Whisper large-v3-turbo on HF Inference Providers
+HUGGINGFACE_ASR_MODEL = (
+    (os.getenv("HUGGINGFACE_ASR_MODEL", "") or "").strip() or "openai/whisper-large-v3-turbo"
+)
+
+# ---- Local offline inference (no API costs; works without internet once models are cached) ----
+# Prefer local faster-whisper + Ollama/NLLB when available; cloud APIs remain fallback.
+_local_flag = (os.getenv("LOCAL_INFERENCE", "") or "").strip().lower()
+if _local_flag in ("0", "false", "off", "no"):
+    LOCAL_INFERENCE = False
+elif _local_flag in ("1", "true", "on", "yes"):
+    LOCAL_INFERENCE = True
+else:
+    # Default on for local/dev so church laptop can run offline-first
+    LOCAL_INFERENCE = ENV == "local"
+
+LOCAL_WHISPER_MODEL = (os.getenv("LOCAL_WHISPER_MODEL", "") or "").strip() or "base"
+LOCAL_WHISPER_DEVICE = (os.getenv("LOCAL_WHISPER_DEVICE", "") or "").strip() or "auto"
+LOCAL_WHISPER_COMPUTE = (os.getenv("LOCAL_WHISPER_COMPUTE", "") or "").strip() or "default"
+OLLAMA_BASE_URL = (os.getenv("OLLAMA_BASE_URL", "") or "").strip() or "http://127.0.0.1:11434"
+OLLAMA_TRANSLATE_MODEL = (os.getenv("OLLAMA_TRANSLATE_MODEL", "") or "").strip() or "qwen2.5:7b"
+# Bearer token for remote Ollama behind a reverse proxy. Leave empty for local unauthenticated Ollama.
+OLLAMA_API_TOKEN = (
+    (os.getenv("OLLAMA_API_TOKEN", "") or os.getenv("OLLAMA_BEARER_TOKEN", "") or "").strip()
+)
+LOCAL_NLLB_MODEL = (
+    (os.getenv("LOCAL_NLLB_MODEL", "") or "").strip() or "facebook/nllb-200-distilled-600M"
+)
+LOCAL_TRANSLATE_PREFER = (os.getenv("LOCAL_TRANSLATE_PREFER", "") or "").strip().lower() or "ollama"
+
 # Chat Completions model for Lingala + DeepL fallbacks (lighter)
 OPENAI_TRANSLATION_MODEL = (os.getenv("OPENAI_TRANSLATION_MODEL", "") or "").strip() or "gpt-4o-mini"
 # Malagasy / Kikongo / Tshiluba: premium Chat Completions model (default gpt-5.1-chat-latest; costly). Legacy: OPENAI_TRANSLATION_MODEL_KIKONGO
@@ -41,23 +76,34 @@ OPENAI_TRANSLATION_MODEL_KIKONGO = _mg_kg_ts  # alias for older configs / health
 
 # Validate required API keys
 def validate_config():
-    """Validate configuration and exit if critical settings are missing."""
+    """Validate configuration. In local ENV: warn only so the UI can still boot."""
     errors = []
 
-    if not (ELEVENLABS_API_KEY or OPENAI_API_KEY):
-        errors.append("Transcription requires ELEVENLABS_API_KEY or OPENAI_API_KEY")
+    # Local-first: cloud keys optional when LOCAL_INFERENCE is on
+    has_cloud_stt = bool(ELEVENLABS_API_KEY or OPENAI_API_KEY or HUGGINGFACE_API_TOKEN)
+    has_cloud_mt = bool(DEEPL_API_KEY or OPENAI_API_KEY)
+    if not LOCAL_INFERENCE and not has_cloud_stt:
+        errors.append(
+            "Transcription requires ELEVENLABS_API_KEY, OPENAI_API_KEY, HUGGINGFACE_API_TOKEN, "
+            "or LOCAL_INFERENCE=true with faster-whisper"
+        )
+    if not LOCAL_INFERENCE and not has_cloud_mt:
+        errors.append(
+            "Translation requires DEEPL_API_KEY or OPENAI_API_KEY "
+            "(or LOCAL_INFERENCE=true with Ollama/NLLB)"
+        )
 
-    # At least one translation API should be available
-    has_translation = bool(DEEPL_API_KEY or OPENAI_API_KEY)
-    if not has_translation:
-        errors.append("At least one translation API key is required (DEEPL_API_KEY or OPENAI_API_KEY)")
+    if not errors:
+        return
 
-    if errors:
-        print("Configuration errors:")
-        for error in errors:
-            print(f"  - {error}")
-        print("\nPlease check your .env file and ensure all required API keys are set.")
-        sys.exit(1)
+    print("Configuration errors:")
+    for error in errors:
+        print(f"  - {error}")
+    print("\nPlease check your .env file and ensure all required API keys are set.")
+    if ENV == "local":
+        print("Continuing in local mode without API keys (transcription/translation will fail until keys are set).\n")
+        return
+    sys.exit(1)
 
 # Validate on import
 validate_config()

@@ -42,7 +42,14 @@ from elevenlabs.core.api_error import ApiError
 from openai import OpenAI
 
 from backend import config
-from backend.transcription import transcribe_file
+from backend.transcription import (
+    _elevenlabs_transcribe_file,
+    transcribe_audio_chunk,
+    transcribe_file,
+)
+from backend.huggingface_asr import hf_transcribe_file
+from backend.local_asr import local_asr_available, local_transcribe_file, warm_local_asr
+from backend.local_translate import local_translate_available, local_translate_text, ollama_available
 from backend.translation import translate_segments
 from backend.vtt_generator import generate_vtt
 from backend.vtt_parser import parse_vtt
@@ -52,10 +59,38 @@ from backend import burn
 app = FastAPI(title="Automatic Subtitles", version="0.1.0")
 logger = logging.getLogger("ondertitels")
 
-FRONTEND_DIR = config.BASE_DIR / "frontend"
+
+@app.on_event("startup")
+async def _warmup_local_models() -> None:
+    """Preload faster-whisper so the first live chunk is not a cold download."""
+    if not config.LOCAL_INFERENCE:
+        return
+    if not local_asr_available():
+        return
+
+    def _warm():
+        try:
+            warm_local_asr(
+                model_size=config.LOCAL_WHISPER_MODEL,
+                device=config.LOCAL_WHISPER_DEVICE,
+                compute_type=config.LOCAL_WHISPER_COMPUTE,
+            )
+            logger.info("Local Whisper warmup complete (%s)", config.LOCAL_WHISPER_MODEL)
+        except Exception as e:
+            logger.warning("Local Whisper warmup failed: %s", e)
+
+    threading.Thread(target=_warm, daemon=True).start()
+
+
+FRONTEND_LEGACY_DIR = config.BASE_DIR / "frontend"
+WEB_DIST_DIR = config.BASE_DIR / "web" / "dist"
+FRONTEND_DIR = WEB_DIST_DIR if (WEB_DIST_DIR / "index.html").is_file() else FRONTEND_LEGACY_DIR
 STATIC_DIR = config.BASE_DIR / "static"
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+_assets_dir = FRONTEND_DIR / "assets"
+if _assets_dir.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="web_assets")
 
 # ---- Firebase auth (magic link) ----
 # Lazy initialization: Firebase will be initialized on first use, not at startup.
@@ -63,39 +98,89 @@ if STATIC_DIR.exists():
 _firebase_initialized = False
 _firebase_init_failed = False
 _firebase_error_msg = ""
+_firebase_has_adc = False
+
 
 def _init_firebase() -> bool:
     """
     Initialize Firebase Admin SDK if not already done.
     Returns True if successful, False if failed or credentials unavailable.
     Safe to call multiple times.
+
+    Locally we may initialize without ADC; ID tokens are then verified via Google's
+    public certs (see `_verify_firebase_id_token`).
     """
-    global _firebase_initialized, _firebase_init_failed, _firebase_error_msg
-    
+    global _firebase_initialized, _firebase_init_failed, _firebase_error_msg, _firebase_has_adc
+
     if _firebase_initialized:
         return True
     if _firebase_init_failed:
         return False
-    
+
     try:
         if firebase_admin._apps:
             _firebase_initialized = True
             return True
-        
-        # On Cloud Run, Application Default Credentials are available.
-        # Locally, this works if you've set GOOGLE_APPLICATION_CREDENTIALS or `gcloud auth application-default login`.
-        firebase_admin.initialize_app(
-            credential=firebase_credentials.ApplicationDefault(),
-            options={"projectId": config.FIREBASE_PROJECT_ID},
-        )
+
+        # Prefer ADC (Cloud Run / gcloud auth application-default login).
+        try:
+            firebase_admin.initialize_app(
+                credential=firebase_credentials.ApplicationDefault(),
+                options={"projectId": config.FIREBASE_PROJECT_ID},
+            )
+            _firebase_has_adc = True
+            logger.info(
+                "Firebase initialized with ADC (project ID: %s)",
+                config.FIREBASE_PROJECT_ID,
+            )
+        except Exception as adc_err:
+            # Local fallback: app without credentials; verify via public JWKS.
+            firebase_admin.initialize_app(options={"projectId": config.FIREBASE_PROJECT_ID})
+            _firebase_has_adc = False
+            logger.warning(
+                "Firebase initialized without ADC (%s: %s). "
+                "Using public-cert token verification for local/dev.",
+                type(adc_err).__name__,
+                str(adc_err)[:160],
+            )
+
         _firebase_initialized = True
-        logger.info("Firebase initialized successfully with project ID: %s", config.FIREBASE_PROJECT_ID)
         return True
     except Exception as e:
         _firebase_init_failed = True
         _firebase_error_msg = f"{type(e).__name__}: {str(e)[:200]}"
         logger.error("Failed to initialize Firebase: %s", _firebase_error_msg)
         return False
+
+
+def _verify_firebase_id_token(token: str) -> dict:
+    """
+    Verify a Firebase ID token.
+    1) Admin SDK when ADC is available
+    2) Fallback: google.oauth2.id_token.verify_firebase_token (public certs, no ADC)
+    """
+    if _firebase_has_adc:
+        try:
+            return firebase_auth.verify_id_token(token)
+        except Exception as e:
+            # ADC may be broken / expired — try public certs before failing.
+            logger.warning(
+                "Admin verify_id_token failed (%s); trying public certs.",
+                type(e).__name__,
+            )
+
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import id_token as google_id_token
+
+    req = google_requests.Request()
+    claims = google_id_token.verify_firebase_token(
+        token,
+        req,
+        audience=config.FIREBASE_PROJECT_ID,
+    )
+    if not isinstance(claims, dict):
+        raise ValueError("Firebase token verification returned no claims.")
+    return claims
 
 
 @app.middleware("http")
@@ -138,7 +223,7 @@ async def _firebase_auth_middleware(request: Request, call_next):
             return JSONResponse({"detail": "Missing Authorization: Bearer <idToken>."}, status_code=401)
         
         try:
-            claims = firebase_auth.verify_id_token(token)
+            claims = _verify_firebase_id_token(token)
             request.state.firebase_claims = claims
             request.state.is_cinema_only = False
             allowed_raw = (config.ALLOWED_EMAILS or "").strip()
@@ -155,10 +240,15 @@ async def _firebase_auth_middleware(request: Request, call_next):
                         return JSONResponse({"detail": "Access restricted to Cinema only."}, status_code=403)
                     request.state.is_cinema_only = True
             else:
-                # No allowlist configured at all: keep users in Cinema-only mode.
-                if not path.startswith("/api/cinema"):
-                    return JSONResponse({"detail": "Access restricted to Cinema only."}, status_code=403)
-                request.state.is_cinema_only = True
+                # No allowlist at all:
+                # - local/dev: any authenticated user gets full access (DX)
+                # - production: keep Cinema-only until allowlists are configured
+                if config.ENV == "local":
+                    request.state.is_cinema_only = False
+                else:
+                    if not path.startswith("/api/cinema"):
+                        return JSONResponse({"detail": "Access restricted to Cinema only."}, status_code=403)
+                    request.state.is_cinema_only = True
         except Exception as e:
             # Don't leak token/PII; but provide enough info to debug config mismatches.
             logger.warning("Firebase token verify failed: %s: %s", type(e).__name__, str(e)[:300])
@@ -561,7 +651,7 @@ def _run_transcription_step(job_id: str, upload_path: Path, on_progress) -> list
     """Run transcription step and return segments, or None if failed."""
     if upload_path.suffix.lower() == ".mp4":
         on_progress(2, "Extracting audio from video…")
-    on_progress(5, "Sending to ElevenLabs for transcription… (please wait, this can take a few minutes)")
+    on_progress(5, "Transcribing… (OpenAI Whisper, ElevenLabs as fallback)")
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(transcribe_file, upload_path, config.ELEVENLABS_API_KEY, openai_api_key=config.OPENAI_API_KEY)
@@ -687,7 +777,7 @@ def _run_transcription_only(
             on_progress(5, "Extracting audio from video…")
         if use_voice_isolation:
             on_progress(8, "Isolating voice (optional)…")
-        on_progress(10, "Sending to ElevenLabs for transcription… (please wait, this can take a few minutes)")
+        on_progress(10, "Transcribing… (OpenAI Whisper, ElevenLabs as fallback)")
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(
                 transcribe_file,
@@ -743,7 +833,7 @@ def _run_transcription_text_only(
             on_progress(5, "Extracting audio from video…")
         if use_voice_isolation:
             on_progress(8, "Isolating voice (optional)…")
-        on_progress(10, "Sending to ElevenLabs for transcription… (please wait, this can take a few minutes)")
+        on_progress(10, "Transcribing… (OpenAI Whisper, ElevenLabs as fallback)")
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(
@@ -1032,6 +1122,13 @@ async def api_health_check():
             "elevenlabs": bool(config.ELEVENLABS_API_KEY),
             "deepl": bool(config.DEEPL_API_KEY),
             "openai": bool(config.OPENAI_API_KEY),
+            "huggingface": bool(config.HUGGINGFACE_API_TOKEN),
+            "local_whisper": local_asr_available() if config.LOCAL_INFERENCE else False,
+            "ollama": (
+                ollama_available(config.OLLAMA_BASE_URL, api_token=config.OLLAMA_API_TOKEN)
+                if config.LOCAL_INFERENCE
+                else False
+            ),
         },
         "firebase": {
             "initialized": _firebase_initialized,
@@ -1043,12 +1140,43 @@ async def api_health_check():
             "OPENAI_TRANSLATION_MODEL": config.OPENAI_TRANSLATION_MODEL,
             "OPENAI_TRANSLATION_MODEL_MG_KG_TS": config.OPENAI_TRANSLATION_MODEL_MG_KG_TS,
         },
+        "live_asr": {
+            "local_inference": config.LOCAL_INFERENCE,
+            "local_whisper_model": config.LOCAL_WHISPER_MODEL if config.LOCAL_INFERENCE else None,
+            "ollama_base_url": config.OLLAMA_BASE_URL if config.LOCAL_INFERENCE else None,
+            "ollama_model": config.OLLAMA_TRANSLATE_MODEL if config.LOCAL_INFERENCE else None,
+            "ollama_auth": bool(config.OLLAMA_API_TOKEN) if config.LOCAL_INFERENCE else False,
+            "provider_order": [
+                "local_faster_whisper",
+                "huggingface",
+                "openai",
+                "elevenlabs",
+            ],
+            "translate_order": [
+                "ollama_qwen",
+                "nllb",
+                "deepl_openai",
+            ],
+            "huggingface_model": config.HUGGINGFACE_ASR_MODEL if config.HUGGINGFACE_API_TOKEN else None,
+            "fallback": "elevenlabs",
+        },
     }
 
     # Check if at least transcription and one translation API are available
-    if not health["apis"]["elevenlabs"]:
+    has_stt = (
+        health["apis"]["elevenlabs"]
+        or health["apis"]["openai"]
+        or health["apis"]["huggingface"]
+        or health["apis"]["local_whisper"]
+    )
+    has_mt = (
+        health["apis"]["deepl"]
+        or health["apis"]["openai"]
+        or health["apis"]["ollama"]
+    )
+    if not has_stt:
         health["status"] = "unhealthy"
-    elif not (health["apis"]["deepl"] or health["apis"]["openai"]):
+    elif not has_mt and not config.LOCAL_INFERENCE:
         health["status"] = "degraded"
 
     return health
@@ -1893,27 +2021,34 @@ def _format_tts_elevenlabs_error(exc: BaseException) -> str:
 
 
 def _openai_tts_to_file(text: str, out_path: Path, lang: str) -> None:
-    """Fallback TTS via OpenAI. Writes MP3 to out_path."""
+    """Primary TTS via OpenAI for supported languages. Writes MP3 to out_path."""
     if not (config.OPENAI_API_KEY or '').strip():
-        raise RuntimeError('OPENAI_API_KEY is not set for OpenAI TTS fallback.')
+        raise RuntimeError('OPENAI_API_KEY is not set for OpenAI TTS.')
 
-    # Only enable fallback for languages we explicitly allow.
     allowed = {
         'en', 'nl', 'fr', 'es', 'pt', 'zh',
     }
     if (lang or '').strip().lower() not in allowed:
-        raise RuntimeError(f'OpenAI TTS fallback is not enabled for language: {lang}')
+        raise RuntimeError(f'OpenAI TTS is not enabled for language: {lang}')
 
-    # Built-in voice set; keep simple default.
     voice = 'coral'
     client = OpenAI(api_key=config.OPENAI_API_KEY.strip())
-    # Use streaming response to write directly to file (avoids holding large audio in memory).
     with client.audio.speech.with_streaming_response.create(
         model='gpt-4o-mini-tts',
         voice=voice,
         input=text,
     ) as resp:
         resp.stream_to_file(out_path)
+
+
+def _elevenlabs_tts_to_file(client: ElevenLabs, text: str, out_path: Path, voice_id: str) -> None:
+    audio_stream = client.text_to_speech.convert(
+        voice_id=voice_id,
+        model_id=config.TTS_MODEL_ID,
+        output_format='mp3_44100_128',
+        text=text,
+    )
+    _write_audio_stream_to_file(audio_stream, out_path)
 
 
 def _run_tts_job(job_id: str, text: str, langs: list[str]) -> None:
@@ -1928,13 +2063,40 @@ def _run_tts_job(job_id: str, text: str, langs: list[str]) -> None:
             set_job_progress(job_id, {"progress": 0, "message": "No languages selected.", "done": True, "error": "Select at least one language."})
             return
 
-        client = ElevenLabs(api_key=config.ELEVENLABS_TTS_API_KEY)
+        openai_tts_langs = {'en', 'nl', 'fr', 'es', 'pt', 'zh'}
+        has_openai = bool((config.OPENAI_API_KEY or '').strip())
+        has_eleven = bool((config.ELEVENLABS_TTS_API_KEY or '').strip())
+        needs_eleven_only = any((lang or '').strip().lower() not in openai_tts_langs for lang in langs)
+
+        if needs_eleven_only and not has_eleven:
+            set_job_progress(
+                job_id,
+                {
+                    "progress": 0,
+                    "message": "Missing ElevenLabs TTS key.",
+                    "done": True,
+                    "error": "ELEVENLABS_TTS_API_KEY (or ELEVENLABS_API_KEY) required for this language.",
+                },
+            )
+            return
+        if not has_openai and not has_eleven:
+            set_job_progress(
+                job_id,
+                {
+                    "progress": 0,
+                    "message": "No TTS provider configured.",
+                    "done": True,
+                    "error": "Set OPENAI_API_KEY and/or ELEVENLABS_TTS_API_KEY.",
+                },
+            )
+            return
+
+        client = ElevenLabs(api_key=config.ELEVENLABS_TTS_API_KEY) if has_eleven else None
         voice_map: dict[str, str] = {}
         for lang in langs:
-            v = (config.TTS_VOICE_IDS.get(lang) or '').strip()
-            if not v:
-                v = config.TTS_DEFAULT_VOICE_ID
-            if not v:
+            lang_l = (lang or '').strip().lower()
+            v = (config.TTS_VOICE_IDS.get(lang) or '').strip() or config.TTS_DEFAULT_VOICE_ID
+            if not v and (lang_l not in openai_tts_langs or not has_openai):
                 set_job_progress(
                     job_id,
                     {
@@ -1955,7 +2117,7 @@ def _run_tts_job(job_id: str, text: str, langs: list[str]) -> None:
             set_job_progress(job_id, {"progress": 0, "message": "Input text is empty.", "done": True, "error": "Input text is empty."})
             return
 
-        items = list(voice_map.items())
+        items = [(lang, voice_map.get(lang, '')) for lang in langs]
         n = len(items)
         total_chunks = len(text_chunks)
         total_steps = max(n * total_chunks, 1)
@@ -1964,7 +2126,6 @@ def _run_tts_job(job_id: str, text: str, langs: list[str]) -> None:
             set_job_progress(job_id, {"progress": 5, "message": f"Generating audio ({lang})...", "done": False, "error": None})
             part_files: list[Path] = []
             for j, chunk_text in enumerate(text_chunks):
-                # Keep progress moving while long requests are processed chunk-by-chunk.
                 done_steps = (i * total_chunks) + j
                 pct = 5 + int(80 * (done_steps / total_steps))
                 set_job_progress(
@@ -1978,18 +2139,33 @@ def _run_tts_job(job_id: str, text: str, langs: list[str]) -> None:
                 )
 
                 part_path = tmp_dir / f"{lang}.part{j:03d}.mp3"
-                try:
-                    audio_stream = client.text_to_speech.convert(
-                        voice_id=voice_id,
-                        model_id=config.TTS_MODEL_ID,
-                        output_format='mp3_44100_128',
-                        text=chunk_text,
-                    )
-                    _write_audio_stream_to_file(audio_stream, part_path)
-                except Exception as e:
-                    # Fallback: OpenAI TTS (only for allowed languages)
-                    set_job_progress(job_id, {"progress": pct, "message": f"ElevenLabs failed; trying OpenAI TTS ({lang}) chunk {j + 1}/{total_chunks}...", "done": False, "error": None})
-                    _openai_tts_to_file(chunk_text, part_path, lang)
+                lang_l = (lang or '').strip().lower()
+                used = False
+
+                # Primary: OpenAI TTS when supported
+                if lang_l in openai_tts_langs and has_openai:
+                    try:
+                        _openai_tts_to_file(chunk_text, part_path, lang)
+                        used = True
+                    except Exception:
+                        set_job_progress(
+                            job_id,
+                            {
+                                "progress": pct,
+                                "message": f"OpenAI TTS failed; trying ElevenLabs ({lang}) chunk {j + 1}/{total_chunks}...",
+                                "done": False,
+                                "error": None,
+                            },
+                        )
+
+                # Fallback: ElevenLabs
+                if not used:
+                    if not client or not voice_id:
+                        raise RuntimeError(
+                            f"No TTS provider available for language '{lang}'. "
+                            "Configure OPENAI_API_KEY and/or ElevenLabs voices."
+                        )
+                    _elevenlabs_tts_to_file(client, chunk_text, part_path, voice_id)
 
                 part_files.append(part_path)
 
@@ -1997,7 +2173,6 @@ def _run_tts_job(job_id: str, text: str, langs: list[str]) -> None:
             set_job_progress(job_id, {"progress": 88, "message": f"Merging chunks ({lang})...", "done": False, "error": None})
             _concat_mp3_parts(part_files, out_mp3)
             generated.append(out_mp3)
-            # Persist MP3 outside tmp_dir so it can be saved to Library later.
             persisted = config.OUTPUT_DIR / f"{job_id}_tts_{lang}.mp3"
             try:
                 persisted.write_bytes(out_mp3.read_bytes())
@@ -2225,6 +2400,224 @@ async def translate_txt_file(
     asyncio.create_task(asyncio.to_thread(_run_txt_translation_only, job_id, input_path, out_path, [lang], on_progress))
 
     return {"job_id": job_id, "status_url": f"/api/status/{job_id}"}
+
+
+@app.post("/api/live/translate-chunk")
+@_api_limit("90/minute")
+async def live_translate_chunk(
+    request: Request,
+    audio: UploadFile = File(...),
+    target_lang: str = Form("nl"),
+    source_lang: str = Form("auto"),
+):
+    """
+    Near-real-time live translation for short microphone chunks.
+
+    Preferred (offline / no API cost):
+      faster-whisper → Ollama Qwen (or NLLB)
+    Cloud fallbacks:
+      HF / OpenAI / ElevenLabs ASR → DeepL / OpenAI MT
+    """
+    target = (target_lang or "").strip().lower()
+    source = (source_lang or "auto").strip().lower()
+    if target not in config.TARGET_LANGUAGES:
+        raise HTTPException(400, f"Unsupported target language: {target}")
+    if source not in ("auto", "") and source not in config.TARGET_LANGUAGES:
+        raise HTTPException(400, f"Unsupported source language: {source}")
+
+    use_local = bool(config.LOCAL_INFERENCE)
+    has_local_asr = use_local and local_asr_available()
+    has_local_mt = use_local and local_translate_available(
+        config.OLLAMA_BASE_URL,
+        api_token=config.OLLAMA_API_TOKEN,
+    )
+    has_hf = bool((config.HUGGINGFACE_API_TOKEN or "").strip())
+    has_openai = bool((config.OPENAI_API_KEY or "").strip())
+    has_eleven = bool((config.ELEVENLABS_API_KEY or "").strip())
+    has_cloud_mt = bool(config.DEEPL_API_KEY or config.OPENAI_API_KEY)
+
+    if not (has_local_asr or has_hf or has_openai or has_eleven):
+        raise HTTPException(
+            503,
+            "Traduction live : installez faster-whisper (LOCAL_INFERENCE) "
+            "ou configurez HUGGINGFACE_API_TOKEN / OPENAI_API_KEY / ELEVENLABS_API_KEY.",
+        )
+    if not (has_local_mt or has_cloud_mt):
+        raise HTTPException(
+            503,
+            "Traduction live : démarrez Ollama (ex. qwen2.5:7b) ou installez NLLB, "
+            "sinon ajoutez DEEPL_API_KEY / OPENAI_API_KEY dans .env.",
+        )
+
+    raw_name = audio.filename or "chunk.webm"
+    suffix = Path(raw_name).suffix.lower()
+    if suffix not in (".webm", ".wav", ".mp3", ".mp4", ".m4a", ".ogg", ".mpeg", ".mpga"):
+        suffix = ".webm"
+
+    chunk_id = str(uuid.uuid4())
+    upload_path = config.UPLOAD_DIR / f"{chunk_id}_live{suffix}"
+    try:
+        with upload_path.open("wb") as f:
+            shutil.copyfileobj(audio.file, f)
+        if upload_path.stat().st_size < 200:
+            return {
+                "text": "",
+                "translation": "",
+                "empty": True,
+                "asr_provider": None,
+                "mt_provider": None,
+            }
+
+        church_prompt = (
+            "Sermon, prière, Bible, Jésus-Christ, Église, Amen. "
+            "Transcription fidèle du français parlé en culte."
+        )
+        lang_hint = None if source in ("", "auto") else source
+
+        def _run():
+            text = ""
+            asr_provider = None
+            mt_provider = None
+            errors: list[str] = []
+            local_asr_succeeded = False
+
+            # 1) Local faster-whisper (primary). Empty result = silence, NOT a failure.
+            if has_local_asr:
+                try:
+                    text = local_transcribe_file(
+                        upload_path,
+                        model_size=config.LOCAL_WHISPER_MODEL,
+                        device=config.LOCAL_WHISPER_DEVICE,
+                        compute_type=config.LOCAL_WHISPER_COMPUTE,
+                        language=lang_hint or "fr",
+                        with_timestamps=False,
+                        vad_filter=False,
+                    )
+                    asr_provider = "local_whisper"
+                    local_asr_succeeded = True
+                except Exception as local_err:
+                    errors.append(f"local Whisper: {local_err}")
+                    logger.warning("Local Whisper failed: %s", local_err)
+
+            # 2) Cloud ASR only if local is unavailable or threw
+            if not local_asr_succeeded and not (text or "").strip() and has_hf:
+                try:
+                    text = hf_transcribe_file(
+                        upload_path,
+                        config.HUGGINGFACE_API_TOKEN,
+                        model=config.HUGGINGFACE_ASR_MODEL,
+                        language=lang_hint,
+                    )
+                    asr_provider = "huggingface"
+                except Exception as hf_err:
+                    errors.append(f"Hugging Face: {hf_err}")
+                    logger.warning("HF live ASR failed: %s", hf_err)
+
+            if not local_asr_succeeded and not (text or "").strip() and has_openai:
+                try:
+                    text = transcribe_audio_chunk(
+                        upload_path,
+                        config.OPENAI_API_KEY,
+                        language=lang_hint,
+                        prompt=church_prompt,
+                    )
+                    asr_provider = "openai"
+                except Exception as oai_err:
+                    errors.append(f"OpenAI: {oai_err}")
+                    logger.warning("OpenAI live ASR failed: %s", oai_err)
+
+            if not local_asr_succeeded and not (text or "").strip() and has_eleven:
+                try:
+                    segs = _elevenlabs_transcribe_file(upload_path, config.ELEVENLABS_API_KEY)
+                    text = " ".join(
+                        (s.get("text") or "").strip() for s in segs if (s.get("text") or "").strip()
+                    )
+                    asr_provider = "elevenlabs"
+                except Exception as el_err:
+                    errors.append(f"ElevenLabs: {el_err}")
+                    logger.warning("ElevenLabs live ASR failed: %s", el_err)
+
+            text = (text or "").strip()
+            if not text:
+                # Silence / no speech: never raise on cloud fallback noise
+                return {
+                    "text": "",
+                    "translation": "",
+                    "empty": True,
+                    "asr_provider": asr_provider,
+                    "mt_provider": None,
+                }
+
+            if source not in ("", "auto") and source == target:
+                return {
+                    "text": text,
+                    "translation": text,
+                    "empty": False,
+                    "asr_provider": asr_provider,
+                    "mt_provider": "passthrough",
+                }
+
+            translation = ""
+            # Prefer VPS/local Ollama when configured; cloud MT as fallback.
+            if has_local_mt:
+                try:
+                    translation, mt_provider = local_translate_text(
+                        text,
+                        target,
+                        source,
+                        ollama_base_url=config.OLLAMA_BASE_URL,
+                        ollama_model=config.OLLAMA_TRANSLATE_MODEL,
+                        nllb_model=config.LOCAL_NLLB_MODEL,
+                        ollama_api_token=config.OLLAMA_API_TOKEN,
+                        prefer=config.LOCAL_TRANSLATE_PREFER,
+                    )
+                except Exception as mt_err:
+                    errors.append(f"local MT: {mt_err}")
+                    logger.warning("Local MT failed: %s", mt_err)
+
+            if not (translation or "").strip() and has_cloud_mt:
+                try:
+                    translated_list = translate_segments(
+                        [{"text": text, "start": 0.0, "end": 0.0}],
+                        target,
+                        "" if source in ("", "auto") else source,
+                        config.DEEPL_API_KEY,
+                        config.OPENAI_API_KEY,
+                    )
+                    translation = (translated_list[0] if translated_list else "").strip()
+                    if translation:
+                        mt_provider = "deepl_openai"
+                except Exception as cloud_mt_err:
+                    errors.append(f"cloud MT: {cloud_mt_err}")
+                    logger.warning("Cloud MT failed: %s", cloud_mt_err)
+
+            if not (translation or "").strip():
+                raise RuntimeError(
+                    "Translation failed. "
+                    + (" | ".join(errors) if errors else "No MT provider succeeded.")
+                )
+
+            return {
+                "text": text,
+                "translation": translation,
+                "empty": False,
+                "asr_provider": asr_provider,
+                "mt_provider": mt_provider,
+            }
+
+        result = await asyncio.to_thread(_run)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Live translate chunk failed")
+        raise HTTPException(500, f"Live translation failed: {e}") from e
+    finally:
+        try:
+            if upload_path.exists():
+                upload_path.unlink()
+        except Exception:
+            pass
 
 
 @app.post("/api/translate")
@@ -3649,6 +4042,11 @@ async def serve_frontend_accueil():
     return await _serve_frontend_shell()
 
 
+@app.get("/traduction-live", include_in_schema=False)
+async def serve_frontend_traduction_live():
+    return await _serve_frontend_shell()
+
+
 @app.get("/bibliotheque", include_in_schema=False)
 async def serve_frontend_bibliotheque():
     return await _serve_frontend_shell()
@@ -3673,40 +4071,44 @@ async def serve_frontend_cinema():
 @app.get("/design.css", include_in_schema=False)
 async def serve_design_css():
     """Serve stylesheet; must not be swallowed by SPA catch-all (which returns index.html)."""
-    path = FRONTEND_DIR / "design.css"
-    if not path.exists():
-        raise HTTPException(404, "design.css not found")
-    return FileResponse(
-        path,
-        media_type="text/css",
-        headers=_NO_STORE_HTML,
-    )
+    for path in (FRONTEND_DIR / "design.css", FRONTEND_LEGACY_DIR / "design.css"):
+        if path.exists():
+            return FileResponse(
+                path,
+                media_type="text/css",
+                headers=_NO_STORE_HTML,
+            )
+    raise HTTPException(404, "design.css not found")
 
 
 @app.get("/app.js", include_in_schema=False)
 async def serve_app_js():
     """ES module bundle for the SPA; must not be caught by the HTML fallback."""
-    path = FRONTEND_DIR / "app.js"
-    if not path.exists():
-        raise HTTPException(404, "app.js not found")
-    return FileResponse(
-        path,
-        media_type="application/javascript",
-        headers=_NO_STORE_HTML,
-    )
+    for path in (FRONTEND_DIR / "app.js", FRONTEND_LEGACY_DIR / "app.js"):
+        if path.exists():
+            return FileResponse(
+                path,
+                media_type="application/javascript",
+                headers=_NO_STORE_HTML,
+            )
+    raise HTTPException(404, "app.js not found")
 
 
 @app.get("/brand-logo.png", include_in_schema=False)
+@app.get("/brand-logo.svg", include_in_schema=False)
 async def serve_brand_logo():
-    """Serve custom brand logo selected by the user."""
-    path = config.BASE_DIR / "Groene druppel met golven ripple.png"
-    if not path.exists():
-        raise HTTPException(404, "Brand logo not found")
-    return FileResponse(
-        path,
-        media_type="image/png",
-        headers=_NO_STORE_HTML,
-    )
+    """Serve brand logo (PNG if present, else bundled SVG)."""
+    png = config.BASE_DIR / "Groene druppel met golven ripple.png"
+    if png.exists():
+        return FileResponse(png, media_type="image/png", headers=_NO_STORE_HTML)
+    for candidate in (
+        FRONTEND_DIR / "brand-logo.svg",
+        WEB_DIST_DIR / "brand-logo.svg",
+        config.BASE_DIR / "web" / "public" / "brand-logo.svg",
+    ):
+        if candidate.is_file():
+            return FileResponse(candidate, media_type="image/svg+xml", headers=_NO_STORE_HTML)
+    raise HTTPException(404, "Brand logo not found")
 
 
 @app.get("/{full_path:path}", include_in_schema=False)
@@ -3735,8 +4137,20 @@ async def serve_frontend_catchall(full_path: str):
             mt, _ = mimetypes.guess_type(str(candidate))
             return FileResponse(candidate, media_type=mt or "application/octet-stream")
         raise HTTPException(404, "Not Found")
+    if p.startswith("assets/"):
+        candidate = (FRONTEND_DIR / p).resolve()
+        try:
+            candidate.relative_to(FRONTEND_DIR.resolve())
+        except ValueError:
+            raise HTTPException(404, "Not Found")
+        if candidate.is_file():
+            mt, _ = mimetypes.guess_type(str(candidate))
+            return FileResponse(candidate, media_type=mt or "application/octet-stream")
+        raise HTTPException(404, "Not Found")
     if p == "design.css":
         css = FRONTEND_DIR / "design.css"
+        if not css.is_file():
+            css = FRONTEND_LEGACY_DIR / "design.css"
         if css.is_file():
             return FileResponse(
                 css,
@@ -3746,6 +4160,8 @@ async def serve_frontend_catchall(full_path: str):
         raise HTTPException(404, "Not Found")
     if p == "app.js":
         js = FRONTEND_DIR / "app.js"
+        if not js.is_file():
+            js = FRONTEND_LEGACY_DIR / "app.js"
         if js.is_file():
             return FileResponse(
                 js,
@@ -3753,15 +4169,8 @@ async def serve_frontend_catchall(full_path: str):
                 headers=_NO_STORE_HTML,
             )
         raise HTTPException(404, "Not Found")
-    if p == "brand-logo.png":
-        logo = config.BASE_DIR / "Groene druppel met golven ripple.png"
-        if logo.is_file():
-            return FileResponse(
-                logo,
-                media_type="image/png",
-                headers=_NO_STORE_HTML,
-            )
-        raise HTTPException(404, "Not Found")
+    if p in ("brand-logo.png", "brand-logo.svg"):
+        return await serve_brand_logo()
     if p in (
         "accueil.html",
         "bibliotheque.html",
@@ -3769,7 +4178,7 @@ async def serve_frontend_catchall(full_path: str):
         "workspace.html",
         "administration.html",
     ):
-        stub_path = FRONTEND_DIR / p
+        stub_path = FRONTEND_LEGACY_DIR / p
         if stub_path.is_file():
             return FileResponse(stub_path, media_type="text/html", headers=_NO_STORE_HTML)
     return await serve_frontend_root()
@@ -3777,4 +4186,10 @@ async def serve_frontend_catchall(full_path: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "backend.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        reload_excludes=[".venv/*", ".venv/**", "**/site-packages/**", "web/node_modules/**"],
+    )

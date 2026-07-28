@@ -299,6 +299,43 @@ def _merge_by_punctuation(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]
     return merged
 
 
+def transcribe_audio_chunk(
+    file_path: Path,
+    openai_api_key: str,
+    *,
+    language: str | None = None,
+    prompt: str | None = None,
+) -> str:
+    """
+    Fast STT for short live-audio chunks via OpenAI Whisper.
+    Returns plain text (no timestamps) for low latency.
+    """
+    if not (openai_api_key or "").strip():
+        raise ValueError("OPENAI_API_KEY is not set for live transcription.")
+
+    client = OpenAI(api_key=openai_api_key.strip())
+    kwargs: dict[str, Any] = {
+        "model": "whisper-1",
+        "response_format": "text",
+    }
+    lang = (language or "").strip().lower()
+    if lang and lang != "auto":
+        # Whisper expects ISO-639-1 (fr, nl, en, …)
+        kwargs["language"] = lang
+    if prompt and prompt.strip():
+        kwargs["prompt"] = prompt.strip()[:800]
+
+    with open(file_path, "rb") as f:
+        resp = client.audio.transcriptions.create(file=f, **kwargs)
+
+    if isinstance(resp, str):
+        return resp.strip()
+    text = getattr(resp, "text", None)
+    if text:
+        return str(text).strip()
+    return str(resp or "").strip()
+
+
 def _openai_transcribe_file(file_path: Path, openai_api_key: str) -> list[dict[str, Any]]:
     """
     Fallback transcription via OpenAI STT (Whisper) returning timestamped segments.
@@ -376,6 +413,49 @@ def _looks_low_quality_transcript(segments: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _elevenlabs_transcribe_file(
+    file_path: Path,
+    api_key: str,
+    model_id: str = "scribe_v2",
+) -> list[dict[str, Any]]:
+    """Transcribe via ElevenLabs Scribe; return timestamped segments."""
+    if not (api_key or "").strip():
+        raise ValueError("ELEVENLABS_API_KEY is not set.")
+
+    client = ElevenLabs(api_key=api_key.strip())
+    with open(file_path, "rb") as f:
+        try:
+            result = client.speech_to_text.convert(
+                file=f,
+                model_id=model_id,
+                timestamps_granularity="word",
+            )
+        except TypeError:
+            result = client.speech_to_text.convert(file=f, model_id=model_id)
+
+    segments: list[dict[str, Any]] = []
+
+    if hasattr(result, "words") and result.words:
+        segments = _segments_from_words(result.words)
+        segments = _merge_short_segments(segments)
+        segments = _merge_by_punctuation(segments)
+
+    if not segments and hasattr(result, "segments"):
+        for seg in result.segments:
+            segments.append(
+                {
+                    "start": float(getattr(seg, "start", 0.0) or 0.0),
+                    "end": float(getattr(seg, "end", 0.0) or 0.0),
+                    "text": (getattr(seg, "text", "") or "").strip(),
+                }
+            )
+
+    if not segments and hasattr(result, "text") and result.text:
+        segments.append({"start": 0.0, "end": 0.0, "text": (result.text or "").strip()})
+
+    return segments
+
+
 def transcribe_file(
     file_path: Path,
     api_key: str,
@@ -387,71 +467,98 @@ def transcribe_file(
     """
     Transcribe audio/video and return segments with start/end times.
 
-    Args:
-        file_path: Path to the audio/video file
-        api_key: ElevenLabs API key
-        model_id: ElevenLabs model to use (default: "scribe_v2")
-        voice_isolation: Whether to use voice isolation preprocessing
-        voice_isolation_api_key: API key for voice isolation (optional)
-
-    Returns:
-        List of segments with format: {"start": float, "end": float, "text": str}
-
-    Raises:
-        ValueError: If API key is missing or invalid
-        Exception: If transcription fails
+    Order:
+      1) Local faster-whisper (if LOCAL_INFERENCE)
+      2) OpenAI Whisper
+      3) ElevenLabs Scribe (fallback)
+    Optional voice isolation still uses ElevenLabs when requested.
     """
-    # Prefer ElevenLabs, but allow OpenAI fallback if ElevenLabs is missing/unavailable.
-    client = None
-    if (api_key or "").strip():
-        client = ElevenLabs(api_key=api_key.strip())
-    elif (openai_api_key or "").strip():
-        # No ElevenLabs key: go straight to OpenAI fallback.
-        return _openai_transcribe_file(file_path, openai_api_key)
-    else:
-        raise ValueError("No transcription API key configured. Set ELEVENLABS_API_KEY or OPENAI_API_KEY.")
-    
-    # For video files, extract audio first (much smaller file = faster upload)
+    from backend import config
+
+    has_openai = bool((openai_api_key or "").strip())
+    has_eleven = bool((api_key or "").strip())
+    use_local = bool(getattr(config, "LOCAL_INFERENCE", False))
+
+    if not use_local and not has_openai and not has_eleven:
+        raise ValueError(
+            "No transcription API key configured. Set OPENAI_API_KEY or ELEVENLABS_API_KEY "
+            "(or LOCAL_INFERENCE=true with faster-whisper)."
+        )
+
     actual_file = file_path
     temp_audio = None
-    if file_path.suffix.lower() == ".mp4":
-        temp_audio = _extract_audio(file_path)
-        if temp_audio != file_path:
-            actual_file = temp_audio
-
-    # Optional: isolate voice (remove background / isolate main voice)
     temp_isolated = None
-    if voice_isolation:
-        try:
-            # Use a dedicated key if provided; otherwise fall back to same ElevenLabs key.
-            isolation_client = client
-            if (voice_isolation_api_key or "").strip():
-                isolation_client = ElevenLabs(api_key=voice_isolation_api_key.strip())
-            temp_isolated = _voice_isolate(actual_file, isolation_client)
-            actual_file = temp_isolated
-        except Exception:
-            # If isolation fails or SDK doesn't support it, continue with original audio
-            temp_isolated = None
-
     try:
-        try:
-            with open(actual_file, "rb") as f:
-                # Some SDK versions use timestamps_granularity; omit if it causes errors
-                try:
-                    result = client.speech_to_text.convert(
-                        file=f,
-                        model_id=model_id,
-                        timestamps_granularity="word",
+        if file_path.suffix.lower() == ".mp4":
+            temp_audio = _extract_audio(file_path)
+            if temp_audio != file_path:
+                actual_file = temp_audio
+
+        if voice_isolation and has_eleven:
+            try:
+                isolation_key = (voice_isolation_api_key or api_key or "").strip()
+                isolation_client = ElevenLabs(api_key=isolation_key)
+                temp_isolated = _voice_isolate(actual_file, isolation_client)
+                actual_file = temp_isolated
+            except Exception:
+                temp_isolated = None
+
+        errors: list[str] = []
+
+        # 0) Local faster-whisper
+        if use_local:
+            try:
+                from backend.local_asr import local_asr_available, local_transcribe_file
+
+                if local_asr_available():
+                    segments = local_transcribe_file(
+                        actual_file,
+                        model_size=config.LOCAL_WHISPER_MODEL,
+                        device=config.LOCAL_WHISPER_DEVICE,
+                        compute_type=config.LOCAL_WHISPER_COMPUTE,
+                        language=None,
+                        with_timestamps=True,
                     )
-                except TypeError:
-                    result = client.speech_to_text.convert(file=f, model_id=model_id)
-        except Exception as e:
-            # Fallback to OpenAI when ElevenLabs fails (quota/permissions/timeouts/etc.)
-            if (openai_api_key or '').strip():
-                return _openai_transcribe_file(actual_file, openai_api_key)
-            raise
+                    if isinstance(segments, list) and segments and not _looks_low_quality_transcript(segments):
+                        return segments
+                    if isinstance(segments, list) and segments and not has_openai and not has_eleven:
+                        return segments
+                    if not segments:
+                        errors.append("Local Whisper returned no segments.")
+                    else:
+                        errors.append("Local Whisper output looked low-quality.")
+            except Exception as e:
+                errors.append(f"Local Whisper: {e}")
+
+        # 1) Primary cloud: OpenAI Whisper
+        if has_openai:
+            try:
+                segments = _openai_transcribe_file(actual_file, openai_api_key)
+                if segments and not _looks_low_quality_transcript(segments):
+                    return segments
+                if segments and not has_eleven:
+                    return segments
+                if not segments:
+                    errors.append("OpenAI Whisper returned no segments.")
+                else:
+                    errors.append("OpenAI Whisper output looked low-quality.")
+            except Exception as e:
+                errors.append(f"OpenAI Whisper: {e}")
+
+        # 2) Fallback: ElevenLabs Scribe
+        if has_eleven:
+            try:
+                segments = _elevenlabs_transcribe_file(actual_file, api_key, model_id=model_id)
+                if segments:
+                    return segments
+                errors.append("ElevenLabs returned no segments.")
+            except Exception as e:
+                errors.append(f"ElevenLabs: {e}")
+
+        raise RuntimeError(
+            "Transcription failed. " + " | ".join(errors) if errors else "Transcription failed."
+        )
     finally:
-        # Clean up temp audio file
         if temp_audio and temp_audio != file_path and temp_audio.exists():
             try:
                 temp_audio.unlink()
@@ -462,34 +569,3 @@ def transcribe_file(
                 temp_isolated.unlink()
             except Exception:
                 pass
-
-    segments: list[dict[str, Any]] = []
-
-    # 1) Probeer eerst woord-timestamps te groeperen
-    if hasattr(result, "words") and result.words:
-        segments = _segments_from_words(result.words)
-        # Extra stappen: segmenten zoveel mogelijk naar volledige zinnen trekken
-        segments = _merge_short_segments(segments)
-        segments = _merge_by_punctuation(segments)
-
-    # 2) Als er geen woord-timestamps zijn maar wel segmenten, gebruik die
-    if not segments and hasattr(result, "segments"):
-        for seg in result.segments:
-            segments.append(
-                {
-                    "start": float(getattr(seg, "start", 0.0) or 0.0),
-                    "end": float(getattr(seg, "end", 0.0) or 0.0),
-                    "text": (getattr(seg, "text", "") or "").strip(),
-                }
-            )
-
-    # 3) Fallback: enkel volledige tekst zonder tijden
-    if not segments and hasattr(result, "text") and result.text:
-        segments.append({"start": 0.0, "end": 0.0, "text": (result.text or "").strip()})
-
-    # If ElevenLabs output looks low-quality (e.g. repeated same caption),
-    # retry once with OpenAI fallback when available.
-    if _looks_low_quality_transcript(segments) and (openai_api_key or '').strip():
-        return _openai_transcribe_file(actual_file, openai_api_key)
-
-    return segments

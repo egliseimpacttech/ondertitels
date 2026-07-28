@@ -5,10 +5,15 @@ python-multipart>=0.0.6
 
 # Transcription
 elevenlabs>=1.0.0
+huggingface_hub>=0.26.0
+# Local offline ASR (no API cost)
+faster-whisper>=1.0.0
 
 # Translation
 deepl>=1.16.0
 openai>=1.65.0
+# Optional local NLLB (heavy): pip install transformers torch
+# Qwen via Ollama does not need a Python package (HTTP to localhost:11434)
 
 # Env
 python-dotenv>=1.0.0
