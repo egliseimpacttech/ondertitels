@@ -18,11 +18,23 @@ import {
 } from '@/lib/firebase';
 import { apiFetch, apiBase } from '@/lib/api';
 
+export type Church = {
+  id: string;
+  name: string;
+  plan: 'free' | 'paid';
+  subscription_status: string;
+  storage_limit_bytes: number | null;
+  has_billing_subscription?: boolean;
+};
+
 type AuthContextValue = {
   user: User | null;
   ready: boolean;
   isAdmin: boolean;
   cinemaOnly: boolean;
+  church: Church | null;
+  storageUsedBytes: number;
+  accessError: string | null;
   signInEmail: (email: string, password: string) => Promise<void>;
   signUpEmail: (email: string, password: string) => Promise<void>;
   signOutUser: () => Promise<void>;
@@ -36,25 +48,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [cinemaOnly, setCinemaOnly] = useState(false);
+  const [church, setChurch] = useState<Church | null>(null);
+  const [storageUsedBytes, setStorageUsedBytes] = useState(0);
+  const [accessError, setAccessError] = useState<string | null>(null);
 
   const refreshAccessFlags = useCallback(async () => {
+    setAccessError(null);
     try {
-      const res = await apiFetch(`${apiBase}/api/library?path=`);
+      const res = await apiFetch(`${apiBase}/api/tenant/status`);
       if (res.status === 403) {
         setCinemaOnly(true);
         setIsAdmin(false);
+        setChurch(null);
+        const data = (await res.json().catch(() => ({}))) as { detail?: string };
+        setAccessError(data.detail || 'Impossible de vérifier l’accès à votre espace.');
         return;
       }
-      setCinemaOnly(false);
-      try {
-        const adminRes = await apiFetch(`${apiBase}/api/admin/status`);
-        const adminData = await adminRes.json().catch(() => ({}));
-        setIsAdmin(!!adminData.is_admin);
-      } catch {
-        setIsAdmin(false);
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { detail?: string };
+        throw new Error(data.detail || `Impossible de charger l’espace (${res.status}).`);
       }
-    } catch {
-      /* keep current flags on transient errors */
+      const data = (await res.json()) as {
+        church: Church | null;
+        is_admin: boolean;
+        storage_used_bytes: number;
+      };
+      setCinemaOnly(false);
+      setChurch(data.church);
+      setStorageUsedBytes(data.storage_used_bytes || 0);
+      setIsAdmin(!!data.is_admin);
+    } catch (e) {
+      setAccessError(
+        e instanceof Error ? e.message : 'Impossible de vérifier l’accès à votre espace.',
+      );
     }
   }, []);
 
@@ -68,6 +94,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         else {
           setIsAdmin(false);
           setCinemaOnly(false);
+          setChurch(null);
+          setStorageUsedBytes(0);
+          setAccessError(null);
         }
         setReady(true);
       });
@@ -81,6 +110,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       ready,
       isAdmin,
       cinemaOnly,
+      church,
+      storageUsedBytes,
+      accessError,
       signInEmail: async (email, password) => {
         await signIn(email, password);
       },
@@ -92,7 +124,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
       refreshAccessFlags,
     }),
-    [user, ready, isAdmin, cinemaOnly, refreshAccessFlags],
+    [user, ready, isAdmin, cinemaOnly, church, storageUsedBytes, accessError, refreshAccessFlags],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

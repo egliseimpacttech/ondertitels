@@ -4,13 +4,19 @@ import {
   getAuth,
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
+  sendEmailVerification,
   signOut,
   onAuthStateChanged,
   type User,
 } from 'firebase/auth';
 
+const firebaseApiKey = import.meta.env.VITE_FIREBASE_CONFIG_API_KEY;
+if (!firebaseApiKey) {
+  throw new Error('Set VITE_FIREBASE_CONFIG_API_KEY before building or starting the frontend.');
+}
+
 const firebaseConfig = {
-  apiKey: 'AIzaSyCfDgHVodELAgjc48FRDgSDuq7WIzs4iq0',
+  apiKey: firebaseApiKey,
   authDomain: 'ondertitels-1.firebaseapp.com',
   projectId: 'ondertitels-1',
   storageBucket: 'ondertitels-1.firebasestorage.app',
@@ -41,11 +47,24 @@ export async function ensureIdToken(forceRefresh = false): Promise<string | null
 
 export async function signIn(email: string, password: string): Promise<User> {
   const cred = await signInWithEmailAndPassword(auth, email, password);
+  if (!cred.user.emailVerified) {
+    try {
+      await sendEmailVerification(cred.user);
+    } finally {
+      await signOut(auth);
+    }
+    throw new Error('Vérifiez votre adresse e-mail. Un nouveau lien de confirmation vient de vous être envoyé.');
+  }
   return cred.user;
 }
 
 export async function signUp(email: string, password: string): Promise<User> {
   const cred = await createUserWithEmailAndPassword(auth, email, password);
+  try {
+    await sendEmailVerification(cred.user);
+  } finally {
+    await signOut(auth);
+  }
   return cred.user;
 }
 

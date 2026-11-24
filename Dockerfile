@@ -1,5 +1,7 @@
 FROM node:22-alpine AS frontend-build
 WORKDIR /web
+ARG VITE_FIREBASE_CONFIG_API_KEY
+ENV VITE_FIREBASE_CONFIG_API_KEY=${VITE_FIREBASE_CONFIG_API_KEY}
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./

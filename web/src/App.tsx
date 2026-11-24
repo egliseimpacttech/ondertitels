@@ -8,11 +8,13 @@ import { CinemaPage } from '@/pages/CinemaPage';
 import { WorkspacePage } from '@/pages/WorkspacePage';
 import { LibraryPage } from '@/pages/LibraryPage';
 import { AdminPage } from '@/pages/AdminPage';
+import { ChurchSetupPage } from '@/pages/ChurchSetupPage';
 import { StudioUploadPage } from '@/pages/studio/StudioUploadPage';
 import { StudioTranscribePage } from '@/pages/studio/StudioTranscribePage';
 import { StudioTranslatePage } from '@/pages/studio/StudioTranslatePage';
 import { StudioTtsPage } from '@/pages/studio/StudioTtsPage';
 import { StudioBurnPage } from '@/pages/studio/StudioBurnPage';
+import { Button } from '@/components/ui/Button';
 import { useEffect, useState } from 'react';
 
 function StartupSplash({ show }: { show: boolean }) {
@@ -37,7 +39,7 @@ function StartupSplash({ show }: { show: boolean }) {
 }
 
 function ProtectedApp() {
-  const { user, ready, cinemaOnly } = useAuth();
+  const { user, ready, cinemaOnly, church, accessError, refreshAccessFlags } = useAuth();
   const location = useLocation();
 
   if (!ready) return <StartupSplash show />;
@@ -50,11 +52,39 @@ function ProtectedApp() {
     );
   }
 
+  if (accessError) {
+    return (
+      <div className="auth-page">
+        <main className="auth-panel" style={{ width: '100%' }}>
+          <section className="auth-card">
+            <h2>Accès indisponible</h2>
+            <p className="auth-card-hint">{accessError}</p>
+            <Button onClick={() => void refreshAccessFlags()}>Réessayer</Button>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  if (!church) return <ChurchSetupPage />;
+
   if (cinemaOnly && !location.pathname.startsWith('/cinema')) {
     return <Navigate to="/cinema" replace />;
   }
 
   const cinemaMode = location.pathname.startsWith('/cinema');
+  const subscriptionInactive =
+    church.plan !== 'free' &&
+    church.subscription_status !== 'active' &&
+    church.subscription_status !== 'trialing';
+
+  if (subscriptionInactive) {
+    return (
+      <AppShell cinemaMode={false}>
+        <AdminPage />
+      </AppShell>
+    );
+  }
 
   return (
     <>

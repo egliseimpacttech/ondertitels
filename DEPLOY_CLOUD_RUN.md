@@ -10,6 +10,7 @@ This repo is already set up for **Cloud Run** deployment via the included `Docke
   - Cloud Run
   - Cloud Build
   - Artifact Registry
+  - Firestore
   - IAM Credentials (needed for signed URL fallback)
 
 Example:
@@ -26,8 +27,11 @@ Cloud Run should run as a dedicated service account (not the default).
 Roles typically needed:
 
 - **Storage** for your bucket (uploads, job status persistence): `roles/storage.objectAdmin` (or stricter if you prefer)
+- **Firestore** for church workspaces and memberships: `roles/datastore.user`
 - **Signed URL fallback** (IAM signBlob): `roles/iam.serviceAccountTokenCreator` on the runtime service account
 - **Firebase Admin invite endpoint** (`/api/admin/invite`): `roles/firebaseauth.admin` (only needed if you use the Admin screen)
+
+Enable Firestore in Native mode in the same project (or configure the Firebase project used by the app). Church membership and Stripe subscription state are stored there.
 
 ### 3) Create the GCS bucket (if you use large uploads)
 
@@ -45,6 +49,7 @@ From the repo root (`ondertitels/`):
 gcloud run deploy ondertitels \
   --source . \
   --region europe-west1 \
+  --set-build-env-vars VITE_FIREBASE_CONFIG_API_KEY=YOUR_FIREBASE_WEB_API_KEY \
   --allow-unauthenticated \
   --port 8080 \
   --set-env-vars ENV=production \
@@ -80,7 +85,27 @@ Notes:
 - **Do not commit** real keys to the repo. Prefer Cloud Run **Secrets** instead of `--set-env-vars` for API keys.
 - If you don’t need GCS (small files, local use), you can leave `GCS_BUCKET_NAME` empty; large uploads in production will then fail.
 
-### 5) Verify
+### 5) Configure Stripe billing
+
+Churches pay **€20/month, VAT included**, for a **100 GB** library quota. The `kaat.dbolle@gmail.com` workspace for Ministère Apostolique Impact is free and unlimited.
+
+1. Enable Stripe Tax and configure your tax registrations in Stripe. Checkout uses an inclusive EUR price and Stripe automatic tax.
+2. Store the Stripe secret key and webhook signing secret in Secret Manager, then expose them to Cloud Run as `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`. Set `APP_BASE_URL` to the public HTTPS Cloud Run URL.
+3. Configure a webhook at `https://YOUR_CLOUD_RUN_URL/api/billing/webhook` for `checkout.session.completed` and `customer.subscription.created`, `customer.subscription.updated`, and `customer.subscription.deleted`.
+4. Ensure the Firebase Authentication project allows email/password sign-up. Church administrators invite members from the in-app Administration page.
+
+Example (after adding the secrets to Secret Manager):
+
+```bash
+gcloud run services update ondertitels \
+  --region europe-west1 \
+  --update-secrets STRIPE_SECRET_KEY=stripe-secret:latest,STRIPE_WEBHOOK_SECRET=stripe-webhook-secret:latest \
+  --update-env-vars APP_BASE_URL=https://YOUR_CLOUD_RUN_URL
+```
+
+The app is also a PWA. Serve it over HTTPS and install it from the desktop browser's **Install app** action; no separate native installer is produced.
+
+### 6) Verify
 
 - App: open the Cloud Run URL
 - Health:

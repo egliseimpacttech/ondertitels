@@ -1,0 +1,19 @@
+{
+  "id": "/",
+  "name": "Ondertitels",
+  "short_name": "Ondertitels",
+  "description": "Sous-titres automatiques et traduction des sermons.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f6f2",
+  "theme_color": "#1f6b4f",
+  "icons": [
+    {
+      "src": "/brand-logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

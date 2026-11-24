@@ -55,6 +55,7 @@ from backend.vtt_generator import generate_vtt
 from backend.vtt_parser import parse_vtt
 from backend import library
 from backend import burn
+from backend import billing, tenants
 
 app = FastAPI(title="Automatic Subtitles", version="0.1.0")
 logger = logging.getLogger("ondertitels")
@@ -194,7 +195,7 @@ async def _firebase_auth_middleware(request: Request, call_next):
     path = request.url.path or ""
     
     # Allow health checks without authentication
-    if path in ("/health", "/api/health"):
+    if path in ("/health", "/api/health", "/api/billing/webhook"):
         return await call_next(request)
     
     if path.startswith("/api/"):
@@ -224,35 +225,102 @@ async def _firebase_auth_middleware(request: Request, call_next):
         
         try:
             claims = _verify_firebase_id_token(token)
-            request.state.firebase_claims = claims
-            request.state.is_cinema_only = False
-            allowed_raw = (config.ALLOWED_EMAILS or "").strip()
-            # Secure-by-default: if ALLOWED_EMAILS is empty, fall back to ADMIN_EMAILS.
-            # This prevents "everyone has full Library access" when allowlist is unset.
-            if not allowed_raw:
-                allowed_raw = (config.ADMIN_EMAILS or "").strip()
-            if allowed_raw:
-                allowed = {e.strip().lower() for e in allowed_raw.split(",") if e.strip()}
-                email = (claims.get("email") or "").strip().lower()
-                if not email or (email not in allowed and not _is_admin_email(email)):
-                    # Non-allowlisted users can only access cinema endpoints
-                    if not path.startswith("/api/cinema"):
-                        return JSONResponse({"detail": "Access restricted to Cinema only."}, status_code=403)
-                    request.state.is_cinema_only = True
-            else:
-                # No allowlist at all:
-                # - local/dev: any authenticated user gets full access (DX)
-                # - production: keep Cinema-only until allowlists are configured
-                if config.ENV == "local":
-                    request.state.is_cinema_only = False
-                else:
-                    if not path.startswith("/api/cinema"):
-                        return JSONResponse({"detail": "Access restricted to Cinema only."}, status_code=403)
-                    request.state.is_cinema_only = True
         except Exception as e:
-            # Don't leak token/PII; but provide enough info to debug config mismatches.
-            logger.warning("Firebase token verify failed: %s: %s", type(e).__name__, str(e)[:300])
-            return JSONResponse({"detail": "Invalid/expired token (Firebase verify failed)."}, status_code=401)
+            logger.warning("Firebase token verify failed: %s", type(e).__name__)
+            return JSONResponse(
+                {"detail": "Invalid/expired Firebase ID token."},
+                status_code=401,
+            )
+
+        request.state.firebase_claims = claims
+        email = (claims.get("email") or "").strip().lower()
+        if not email or not claims.get("email_verified"):
+            return JSONResponse(
+                {
+                    "detail": "Vérifiez votre adresse e-mail avant d’accéder à un espace.",
+                    "code": "email_not_verified",
+                },
+                status_code=403,
+            )
+        request.state.is_cinema_only = False
+        request.state.tenant_id = None
+        request.state.tenant = None
+        request.state.tenant_role = None
+        try:
+            membership = tenants.get_membership(email) if email else None
+            if not membership and email:
+                configured_emails = {
+                    item.strip().lower()
+                    for raw in (config.ALLOWED_EMAILS, config.ADMIN_EMAILS)
+                    for item in (raw or "").split(",")
+                    if item.strip()
+                }
+                if email == tenants.MINISTRY_ADMIN_EMAIL:
+                    membership = tenants.ensure_ministry_membership(email, "admin")
+                elif email in configured_emails:
+                    role = "admin" if _is_admin_email(email) else "member"
+                    membership = tenants.ensure_ministry_membership(email, role)
+        except Exception as e:
+            logger.exception("Church workspace lookup failed")
+            return JSONResponse(
+                {"detail": "Church workspace lookup failed. Please try again later."},
+                status_code=503,
+            )
+
+        if membership:
+            church_id = str(membership.get("church_id") or "")
+            try:
+                church = tenants.get_church(church_id) if church_id else None
+            except Exception:
+                logger.exception("Could not load church workspace.")
+                return JSONResponse(
+                    {"detail": "Church workspace lookup failed. Please try again later."},
+                    status_code=503,
+                )
+            if not church:
+                logger.error("User membership refers to a missing church workspace.")
+                return JSONResponse(
+                    {"detail": "Church workspace is unavailable. Contact support."},
+                    status_code=503,
+                )
+            request.state.tenant_id = church_id
+            request.state.tenant = church
+            request.state.tenant_role = membership.get("role")
+            request.state.is_admin = membership.get("role") == "admin"
+            is_free = church.get("plan") == "free"
+            subscription_status = church.get("subscription_status")
+            billing_path = (
+                path == "/api/tenant/status"
+                or path.startswith("/api/billing/")
+                or path in ("/api/admin/status", "/api/admin/members")
+            )
+            if (
+                not is_free
+                and subscription_status not in ("active", "trialing")
+                and not billing_path
+            ):
+                return JSONResponse(
+                    {
+                        "detail": "Het abonnement is niet actief. De kerkbeheerder kan de betaling hervatten.",
+                        "code": "subscription_inactive",
+                    },
+                    status_code=402,
+                )
+            limit = church.get("storage_limit_bytes")
+            storage_limit = int(limit) if limit is not None else None
+            with library.tenant_scope(church_id, storage_limit):
+                return await call_next(request)
+
+        request.state.is_cinema_only = True
+        if path in ("/api/tenant/status", "/api/church/register"):
+            return await call_next(request)
+        if path.startswith("/api/cinema/"):
+            with library.tenant_scope(tenants.MINISTRY_TENANT_ID, None):
+                return await call_next(request)
+        return JSONResponse(
+            {"detail": "Je e-mailadres hoort nog niet bij een kerk. Vraag de beheerder om toegang."},
+            status_code=403,
+        )
     
     return await call_next(request)
 
@@ -306,6 +374,20 @@ def _api_limit(limit_str: str):
 @app.exception_handler(RateLimitExceeded)
 async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
     return PlainTextResponse("Too many requests. Please wait and try again.", status_code=429)
+
+
+@app.exception_handler(library.StorageLimitExceeded)
+async def _storage_limit_handler(request: Request, exc: library.StorageLimitExceeded):
+    return JSONResponse(
+        {
+            "detail": "Deze upload overschrijdt de opslaglimiet van 100 GB voor de kerk.",
+            "code": "storage_limit_exceeded",
+            "storage_used_bytes": exc.used_bytes,
+            "storage_limit_bytes": exc.limit_bytes,
+        },
+        status_code=413,
+    )
+
 
 # In-memory progress per job: { job_id: { progress, message, done, error?, eta_seconds? } }
 job_progress: dict[str, dict] = {}
@@ -486,7 +568,7 @@ def _is_admin_email(email: str) -> bool:
 def _require_admin(request: Request) -> str:
     claims = getattr(request.state, "firebase_claims", {}) or {}
     email = (claims.get("email") or "").strip().lower()
-    if not _is_admin_email(email):
+    if not email or getattr(request.state, "tenant_role", None) != "admin":
         raise HTTPException(403, "Forbidden")
     return email
 
@@ -615,6 +697,18 @@ def _get_gcs_bucket():
     if not (config.GCS_BUCKET_NAME or "").strip():
         raise HTTPException(500, "GCS_BUCKET_NAME is not set on the server.")
     return storage.Client().bucket(config.GCS_BUCKET_NAME)
+
+
+def _tenant_processing_prefix(request: Request) -> str:
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if not tenant_id:
+        raise HTTPException(403, "A church workspace is required for uploads.")
+    return f"churches/{tenant_id}/processing/"
+
+
+def _require_tenant_processing_object(request: Request, object_name: str) -> None:
+    if not object_name.startswith(_tenant_processing_prefix(request)):
+        raise HTTPException(403, "This uploaded object does not belong to your church.")
 
 
 def _signed_gcs_get_url(blob_name: str, expires_seconds: int = 1800) -> str:
@@ -1530,7 +1624,7 @@ async def gcs_upload_url(
         if suffix not in (".mp4", ".mp3", ".mpeg", ".wav", ".m4a", ".vtt", ".txt", ".webm", ".mkv"):
             raise HTTPException(400, "Only MP4, MP3, MPEG, WAV, M4A, WebM, MKV, VTT, or TXT allowed.")
 
-        object_name = f"library/files/upload_{uuid.uuid4()}{suffix}"
+        object_name = f"{_tenant_processing_prefix(request)}upload_{uuid.uuid4()}{suffix}"
         blob = bucket.blob(object_name)
         try:
             # Works when credentials include a private key (e.g., local service account JSON).
@@ -1595,7 +1689,7 @@ async def gcs_resumable_session(
         suffix = Path(filename or "").suffix.lower()
         if suffix not in (".mp4", ".mp3", ".mpeg", ".wav", ".m4a", ".vtt", ".txt", ".webm", ".mkv"):
             raise HTTPException(400, "Only MP4, MP3, MPEG, WAV, M4A, WebM, MKV, VTT, or TXT allowed.")
-        object_name = f"library/files/upload_{uuid.uuid4()}{suffix}"
+        object_name = f"{_tenant_processing_prefix(request)}upload_{uuid.uuid4()}{suffix}"
         blob = bucket.blob(object_name)
         session_url = blob.create_resumable_upload_session(
             content_type=content_type or "application/octet-stream",
@@ -1620,6 +1714,8 @@ async def burn_into_video_gcs(
     Burn subtitles into video from files uploaded to GCS.
     Expects both objects to exist in the configured bucket.
     """
+    _require_tenant_processing_object(request, video_object_name)
+    _require_tenant_processing_object(request, vtt_object_name)
     v_suffix = Path(video_object_name or "").suffix.lower()
     if v_suffix not in (".mp4", ".webm", ".mkv"):
         raise HTTPException(400, "Video must be MP4, WebM, or MKV.")
@@ -1712,6 +1808,7 @@ async def transcribe_only_gcs(
     Returns job_id immediately; GCS download + transcription run in a background thread
     so the browser can poll /api/status/{job_id} while the file is copied from GCS.
     """
+    _require_tenant_processing_object(request, object_name)
     suffix = Path(object_name or "").suffix.lower()
     if suffix not in (".mp4", ".mp3", ".mpeg", ".wav", ".m4a"):
         raise HTTPException(400, "Only MP4, MP3, WAV, or M4A allowed.")
@@ -1800,6 +1897,7 @@ async def transcribe_text_only_gcs(
     Start text transcription from a file already uploaded to GCS.
     Returns job_id immediately; GCS download + transcription run in a background thread.
     """
+    _require_tenant_processing_object(request, object_name)
     suffix = Path(object_name or "").suffix.lower()
     if suffix not in (".mp4", ".mp3", ".mpeg", ".wav", ".m4a"):
         raise HTTPException(400, "Only MP4, MP3, WAV, or M4A allowed.")
@@ -2854,7 +2952,7 @@ async def stream_cinema_video(video_id: str):
     if not _cinema_item_is_public(video_id, ("video",)):
         raise HTTPException(404, "Video not found")
     if (config.GCS_BUCKET_NAME or "").strip():
-        url = _signed_gcs_get_url(f"library/files/{video_id}", expires_seconds=1800)
+        url = _signed_gcs_get_url(library.file_storage_blob_name(video_id), expires_seconds=1800)
         return RedirectResponse(url=url, status_code=307)
     result = library.get_file_path(video_id)
     if not result:
@@ -2880,7 +2978,7 @@ async def stream_cinema_audio(file_id: str):
     if not _cinema_item_is_public(file_id, ("audio",)):
         raise HTTPException(404, "Audio not found")
     if (config.GCS_BUCKET_NAME or "").strip():
-        url = _signed_gcs_get_url(f"library/files/{file_id}", expires_seconds=1800)
+        url = _signed_gcs_get_url(library.file_storage_blob_name(file_id), expires_seconds=1800)
         return RedirectResponse(url=url, status_code=307)
     result = library.get_file_path(file_id)
     if not result:
@@ -2982,7 +3080,7 @@ async def watch_video_with_subtitles(request: Request, video_id: str, lang: str 
             vtt_id = subs.get(eff_lang)
 
     if (config.GCS_BUCKET_NAME or "").strip():
-        video_src = _signed_gcs_get_url(f"library/files/{video_id}", expires_seconds=1800)
+        video_src = _signed_gcs_get_url(library.file_storage_blob_name(video_id), expires_seconds=1800)
     else:
         video_src = f"/api/cinema/video/{video_id}"
         if token:
@@ -3476,10 +3574,99 @@ async def read_cinema_ebook(request: Request, file_id: str):
 
 @app.get("/api/admin/status")
 async def admin_status(request: Request):
-    """Check if current user is admin."""
-    claims = getattr(request.state, 'firebase_claims', {})
-    user_email = (claims.get('email') or '').strip().lower()
-    return {"is_admin": _is_admin_email(user_email)}
+    """Return whether the current church user is an administrator."""
+    return {"is_admin": getattr(request.state, "tenant_role", None) == "admin"}
+
+
+@app.get("/api/tenant/status")
+async def tenant_status(request: Request):
+    church = getattr(request.state, "tenant", None)
+    if not church:
+        return {"church": None, "is_admin": False, "storage_used_bytes": 0}
+    return {
+        "church": {
+            "id": church["id"],
+            "name": church.get("name", ""),
+            "plan": church.get("plan", "paid"),
+            "subscription_status": church.get("subscription_status", "incomplete"),
+            "storage_limit_bytes": church.get("storage_limit_bytes"),
+            "has_billing_subscription": bool(church.get("stripe_subscription_id")),
+        },
+        "is_admin": getattr(request.state, "tenant_role", None) == "admin",
+        "storage_used_bytes": library.get_storage_usage_bytes(),
+    }
+
+
+@app.post("/api/church/register")
+@_api_limit("5/hour")
+async def register_church(request: Request, name: str = Form(...)):
+    claims = getattr(request.state, "firebase_claims", {}) or {}
+    email = (claims.get("email") or "").strip().lower()
+    uid = str(claims.get("uid") or claims.get("sub") or "")
+    try:
+        church = tenants.create_church(name, uid, email)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    return {
+        "church": {
+            "id": church["id"],
+            "name": church["name"],
+            "subscription_status": church["subscription_status"],
+        }
+    }
+
+
+@app.post("/api/billing/checkout")
+@_api_limit("5/hour")
+async def billing_checkout(request: Request):
+    email = _require_admin(request)
+    church = getattr(request.state, "tenant", None)
+    if not church:
+        raise HTTPException(404, "Church workspace not found.")
+    if church.get("plan") == "free":
+        raise HTTPException(400, "The free ministry workspace does not need a subscription.")
+    try:
+        return {"url": billing.create_checkout_session(church, email)}
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+    except Exception as exc:
+        logger.exception("Could not create Stripe checkout session")
+        raise HTTPException(502, f"Could not start Stripe checkout: {exc}")
+
+
+@app.post("/api/billing/portal")
+@_api_limit("5/hour")
+async def billing_portal(request: Request):
+    _require_admin(request)
+    church = getattr(request.state, "tenant", None)
+    if not church:
+        raise HTTPException(404, "Church workspace not found.")
+    try:
+        return {"url": billing.create_portal_session(church)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+    except Exception as exc:
+        logger.exception("Could not create Stripe billing portal session")
+        raise HTTPException(502, f"Could not open Stripe billing portal: {exc}")
+
+
+@app.post("/api/billing/webhook")
+async def stripe_webhook(request: Request):
+    try:
+        billing.process_webhook(
+            await request.body(),
+            request.headers.get("stripe-signature", ""),
+        )
+    except billing.stripe.SignatureVerificationError:
+        raise HTTPException(400, "Invalid Stripe webhook signature.")
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+    except Exception as exc:
+        logger.exception("Stripe webhook processing failed")
+        raise HTTPException(500, "Stripe webhook processing failed.")
+    return {"received": True}
 
 
 @app.post("/api/admin/invite")
@@ -3494,23 +3681,61 @@ async def admin_invite_user(request: Request, email: str = Form(...)):
     if not target_email or "@" not in target_email:
         raise HTTPException(400, "Invalid email.")
 
-    # If there is an allowlist, only allow inviting allowlisted emails
-    allowed_raw = (config.ALLOWED_EMAILS or "").strip()
-    if allowed_raw:
-        allowed = {e.strip().lower() for e in allowed_raw.split(",") if e.strip()}
-        if target_email not in allowed:
-            raise HTTPException(400, "Email is not in ALLOWED_EMAILS.")
-
     try:
         try:
-            firebase_auth.get_user_by_email(target_email)
-        except Exception:
-            firebase_auth.create_user(email=target_email, email_verified=False, disabled=False)
+            invited_user = firebase_auth.get_user_by_email(target_email)
+        except firebase_auth.UserNotFoundError:
+            invited_user = firebase_auth.create_user(
+                email=target_email,
+                email_verified=False,
+                disabled=False,
+            )
 
+        church = getattr(request.state, "tenant", None)
+        if not church:
+            raise HTTPException(404, "Church workspace not found.")
+        try:
+            tenants.add_member(church["id"], target_email)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
         link = firebase_auth.generate_password_reset_link(target_email)
-        return {"email": target_email, "password_reset_link": link}
+        verification_link = (
+            None
+            if invited_user.email_verified
+            else firebase_auth.generate_email_verification_link(target_email)
+        )
+        return {
+            "email": target_email,
+            "password_reset_link": link,
+            "email_verification_link": verification_link,
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Invite failed: {e}")
+
+
+@app.get("/api/admin/members")
+async def admin_list_members(request: Request):
+    _require_admin(request)
+    church = getattr(request.state, "tenant", None)
+    if not church:
+        raise HTTPException(404, "Church workspace not found.")
+    return {"members": tenants.list_members(church["id"])}
+
+
+@app.delete("/api/admin/members/{email}")
+async def admin_remove_member(request: Request, email: str):
+    _require_admin(request)
+    church = getattr(request.state, "tenant", None)
+    if not church:
+        raise HTTPException(404, "Church workspace not found.")
+    try:
+        if tenants.remove_member(church["id"], email):
+            return {"success": True}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    raise HTTPException(404, "Member not found.")
 
 
 @app.get("/api/library/file/{file_id}/cinema")
@@ -3689,12 +3914,11 @@ async def create_library_folder(request: Request, name: str = Form(...), parent:
     """Create a new folder in the library."""
     claims = getattr(request.state, 'firebase_claims', {})
     user_email = (claims.get('email') or '').strip().lower()
-    if not _is_admin_email(user_email):
+    if getattr(request.state, "tenant_role", None) != "admin":
         raise HTTPException(403, "Only admins can create folders with access restrictions")
     
     allowed_list = [e.strip() for e in allowed_emails.split(',') if e.strip()]
-    # Always include the admin's email
-    if user_email not in allowed_list:
+    if allowed_list and user_email not in allowed_list:
         allowed_list.append(user_email)
     
     return library.create_folder(name, parent, allowed_list)
@@ -3721,12 +3945,11 @@ async def update_library_folder_permissions(request: Request, folder_id: str, al
     """Update folder access permissions."""
     claims = getattr(request.state, 'firebase_claims', {})
     user_email = (claims.get('email') or '').strip().lower()
-    if not _is_admin_email(user_email):
+    if getattr(request.state, "tenant_role", None) != "admin":
         raise HTTPException(403, "Only admins can update folder permissions")
     
     allowed_list = [e.strip().lower() for e in allowed_emails.split(',') if e.strip()]
-    # Always include the admin's email
-    if user_email not in allowed_list:
+    if allowed_list and user_email not in allowed_list:
         allowed_list.append(user_email)
     
     if library.update_folder_permissions(folder_id, allowed_list):
@@ -3844,11 +4067,13 @@ async def youtube_to_library(
 
 @app.post("/api/library/import-gcs")
 async def import_to_library_from_gcs(
+    request: Request,
     object_name: str = Form(...),
     folder: str = Form(""),
     filename: str = Form(""),
 ):
     """Import a file from GCS into the library."""
+    _require_tenant_processing_object(request, object_name)
     temp_path: Path | None = None
     try:
         bucket = _get_gcs_bucket()
@@ -4147,6 +4372,20 @@ async def serve_frontend_catchall(full_path: str):
         if candidate.is_file():
             mt, _ = mimetypes.guess_type(str(candidate))
             return FileResponse(candidate, media_type=mt or "application/octet-stream")
+        raise HTTPException(404, "Not Found")
+    if p in ("manifest.webmanifest", "sw.js"):
+        candidate = FRONTEND_DIR / p
+        if candidate.is_file():
+            media_type = (
+                "application/manifest+json"
+                if p == "manifest.webmanifest"
+                else "application/javascript"
+            )
+            return FileResponse(
+                candidate,
+                media_type=media_type,
+                headers={"Cache-Control": "no-cache"},
+            )
         raise HTTPException(404, "Not Found")
     if p == "design.css":
         css = FRONTEND_DIR / "design.css"

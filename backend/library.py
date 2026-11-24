@@ -3,6 +3,8 @@ import json
 import shutil
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -15,9 +17,45 @@ LIBRARY_DIR.mkdir(exist_ok=True)
 LIBRARY_INDEX = BASE_DIR / "library_index.json"
 LIBRARY_CACHE_DIR = UPLOAD_DIR / "library_cache"
 LIBRARY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+LEGACY_TENANT_ID = "ministere-apostolique-impact"
+
+_tenant_id: ContextVar[str | None] = ContextVar("library_tenant_id", default=None)
+_storage_limit: ContextVar[int | None] = ContextVar("library_storage_limit", default=None)
 
 _gcs_client: storage.Client | None = None
 _gcs_bucket: storage.Bucket | None = None
+
+
+class StorageLimitExceeded(Exception):
+    def __init__(self, used_bytes: int, limit_bytes: int) -> None:
+        self.used_bytes = used_bytes
+        self.limit_bytes = limit_bytes
+        super().__init__("The church storage limit would be exceeded.")
+
+
+@contextmanager
+def tenant_scope(tenant_id: str | None, storage_limit_bytes: int | None):
+    tenant_token: Token[str | None] = _tenant_id.set(tenant_id)
+    limit_token: Token[int | None] = _storage_limit.set(storage_limit_bytes)
+    try:
+        yield
+    finally:
+        _storage_limit.reset(limit_token)
+        _tenant_id.reset(tenant_token)
+
+
+def _tenant_library_prefix() -> str:
+    tenant_id = _tenant_id.get()
+    return f"churches/{tenant_id}/library" if tenant_id else "library"
+
+
+def _tenant_library_dir() -> Path:
+    tenant_id = _tenant_id.get()
+    return LIBRARY_DIR / tenant_id if tenant_id else LIBRARY_DIR
+
+
+def _legacy_ministry_scope() -> bool:
+    return _tenant_id.get() == LEGACY_TENANT_ID
 
 
 def _use_gcs() -> bool:
@@ -35,15 +73,26 @@ def _get_bucket() -> storage.Bucket:
 
 
 def _index_blob_name() -> str:
-    return "library/index.json"
+    return f"{_tenant_library_prefix()}/index.json"
 
 
 def _file_blob_name(file_id: str) -> str:
-    return f"library/files/{file_id}"
+    return f"{_tenant_library_prefix()}/files/{file_id}"
+
+
+def file_storage_blob_name(file_id: str) -> str:
+    blob_name = _file_blob_name(file_id)
+    if _use_gcs() and _legacy_ministry_scope():
+        bucket = _get_bucket()
+        if not bucket.blob(blob_name).exists():
+            legacy_name = f"library/files/{file_id}"
+            if bucket.blob(legacy_name).exists():
+                return legacy_name
+    return blob_name
 
 
 def _cinema_cover_blob_name(file_id: str) -> str:
-    return f"library/covers/cinema_{file_id}.jpg"
+    return f"{_tenant_library_prefix()}/covers/cinema_{file_id}.jpg"
 
 
 def upload_cinema_cover_from_path(file_id: str, jpeg_path: Path) -> None:
@@ -57,7 +106,10 @@ def upload_cinema_cover_from_path(file_id: str, jpeg_path: Path) -> None:
 def download_cinema_cover_bytes(file_id: str) -> bytes | None:
     if not _use_gcs():
         return None
-    blob = _get_bucket().blob(_cinema_cover_blob_name(file_id))
+    bucket = _get_bucket()
+    blob = bucket.blob(_cinema_cover_blob_name(file_id))
+    if not blob.exists() and _legacy_ministry_scope():
+        blob = bucket.blob(f"library/covers/cinema_{file_id}.jpg")
     if not blob.exists():
         return None
     return blob.download_as_bytes()
@@ -66,7 +118,10 @@ def download_cinema_cover_bytes(file_id: str) -> bytes | None:
 def delete_cinema_cover_gcs(file_id: str) -> None:
     if not _use_gcs():
         return
-    blob = _get_bucket().blob(_cinema_cover_blob_name(file_id))
+    bucket = _get_bucket()
+    blob = bucket.blob(_cinema_cover_blob_name(file_id))
+    if not blob.exists() and _legacy_ministry_scope():
+        blob = bucket.blob(f"library/covers/cinema_{file_id}.jpg")
     if blob.exists():
         blob.delete()
 
@@ -74,16 +129,24 @@ def delete_cinema_cover_gcs(file_id: str) -> None:
 def cinema_cover_exists_on_gcs(file_id: str) -> bool:
     if not _use_gcs():
         return False
-    return _get_bucket().blob(_cinema_cover_blob_name(file_id)).exists()
+    bucket = _get_bucket()
+    if bucket.blob(_cinema_cover_blob_name(file_id)).exists():
+        return True
+    return _legacy_ministry_scope() and bucket.blob(f"library/covers/cinema_{file_id}.jpg").exists()
 
 
 def _read_file_bytes(file_id: str) -> bytes | None:
     if _use_gcs():
-        blob = _get_bucket().blob(_file_blob_name(file_id))
+        bucket = _get_bucket()
+        blob = bucket.blob(_file_blob_name(file_id))
+        if not blob.exists() and _legacy_ministry_scope():
+            blob = bucket.blob(f"library/files/{file_id}")
         if not blob.exists():
             return None
         return blob.download_as_bytes()
-    file_path = LIBRARY_DIR / file_id
+    file_path = _tenant_library_dir() / file_id
+    if not file_path.exists() and _legacy_ministry_scope():
+        file_path = LIBRARY_DIR / file_id
     if not file_path.exists():
         return None
     return file_path.read_bytes()
@@ -93,14 +156,18 @@ def _write_file_bytes(file_id: str, data: bytes) -> None:
     if _use_gcs():
         _get_bucket().blob(_file_blob_name(file_id)).upload_from_string(data)
         return
-    (LIBRARY_DIR / file_id).write_bytes(data)
+    folder = _tenant_library_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / file_id).write_bytes(data)
 
 
 def _write_file_from_path(file_id: str, source_path: Path) -> None:
     if _use_gcs():
         _get_bucket().blob(_file_blob_name(file_id)).upload_from_filename(str(source_path))
         return
-    shutil.copyfile(str(source_path), str(LIBRARY_DIR / file_id))
+    folder = _tenant_library_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(str(source_path), str(folder / file_id))
 
 
 def _delete_file_storage(file_id: str) -> None:
@@ -108,6 +175,8 @@ def _delete_file_storage(file_id: str) -> None:
     if _use_gcs():
         bucket = _get_bucket()
         blob = bucket.blob(_file_blob_name(file_id))
+        if not blob.exists() and _legacy_ministry_scope():
+            blob = bucket.blob(f"library/files/{file_id}")
         if blob.exists():
             blob.delete()
         # Cinema poster for this video (same id as library file)
@@ -116,10 +185,14 @@ def _delete_file_storage(file_id: str) -> None:
         except Exception:
             pass
     else:
-        p = LIBRARY_DIR / file_id
+        p = _tenant_library_dir() / file_id
+        if not p.exists() and _legacy_ministry_scope():
+            p = LIBRARY_DIR / file_id
         if p.exists():
             p.unlink()
-    cache_path = LIBRARY_CACHE_DIR / file_id
+    cache_path = LIBRARY_CACHE_DIR / (_tenant_id.get() or "default") / file_id
+    if not cache_path.exists() and not _tenant_id.get():
+        cache_path = LIBRARY_CACHE_DIR / file_id
     if cache_path.exists():
         try:
             cache_path.unlink()
@@ -137,11 +210,19 @@ def _delete_file_storage(file_id: str) -> None:
 def _load_index() -> Dict[str, Any]:
     """Load the library index (folder structure and file metadata)."""
     if _use_gcs():
-        blob = _get_bucket().blob(_index_blob_name())
+        bucket = _get_bucket()
+        blob = bucket.blob(_index_blob_name())
+        if not blob.exists() and _legacy_ministry_scope():
+            blob = bucket.blob("library/index.json")
         if blob.exists():
             return json.loads(blob.download_as_text(encoding="utf-8"))
         return {"folders": {}, "files": {}}
-    if LIBRARY_INDEX.exists():
+    tenant_index = _tenant_library_dir() / "index.json"
+    if tenant_index.exists():
+        return json.loads(tenant_index.read_text(encoding="utf-8"))
+    if not _tenant_id.get() and LIBRARY_INDEX.exists():
+        return json.loads(LIBRARY_INDEX.read_text(encoding="utf-8"))
+    if _legacy_ministry_scope() and LIBRARY_INDEX.exists():
         return json.loads(LIBRARY_INDEX.read_text(encoding="utf-8"))
     return {"folders": {}, "files": {}}
 
@@ -155,7 +236,28 @@ def _save_index(index: Dict[str, Any]) -> None:
             content_type="application/json; charset=utf-8",
         )
         return
-    LIBRARY_INDEX.write_text(payload, encoding="utf-8")
+    if not _tenant_id.get():
+        LIBRARY_INDEX.write_text(payload, encoding="utf-8")
+        return
+    tenant_index = _tenant_library_dir() / "index.json"
+    tenant_index.parent.mkdir(parents=True, exist_ok=True)
+    tenant_index.write_text(payload, encoding="utf-8")
+
+
+def get_storage_usage_bytes() -> int:
+    return sum(
+        max(0, int(info.get("size", 0) or 0))
+        for info in _load_index().get("files", {}).values()
+    )
+
+
+def _ensure_storage_capacity(additional_bytes: int) -> None:
+    limit_bytes = _storage_limit.get()
+    if limit_bytes is None or additional_bytes <= 0:
+        return
+    used_bytes = get_storage_usage_bytes()
+    if used_bytes + additional_bytes > limit_bytes:
+        raise StorageLimitExceeded(used_bytes, limit_bytes)
 
 
 def list_folder(folder_path: str = "", user_email: str = "") -> Dict[str, Any]:
@@ -239,10 +341,12 @@ def upload_file(file_data: bytes, filename: str, folder_path: str = "", overwrit
     if overwrite:
         for existing_id, existing_info in index.get("files", {}).items():
             if existing_info.get("folder", "") == folder_path and existing_info.get("name") == filename:
+                _ensure_storage_capacity(len(file_data) - int(existing_info.get("size", 0) or 0))
                 _write_file_bytes(existing_id, file_data)
                 existing_info["size"] = len(file_data)
                 _save_index(index)
                 return {"id": existing_id, "name": filename, "type": existing_info.get("type", "other"), "overwritten": True}
+    _ensure_storage_capacity(len(file_data))
     file_id = str(uuid.uuid4())
     suffix = Path(filename).suffix.lower()
     file_type = {".vtt": "vtt", ".txt": "text", ".mp3": "audio", ".mp4": "video", ".wav": "audio", ".m4a": "audio"}.get(suffix, "other")
@@ -259,10 +363,12 @@ def upload_file_from_path(source_path: Path, filename: str, folder_path: str = "
     if overwrite:
         for existing_id, existing_info in index.get("files", {}).items():
             if existing_info.get("folder", "") == folder_path and existing_info.get("name") == filename:
+                _ensure_storage_capacity(size - int(existing_info.get("size", 0) or 0))
                 _write_file_from_path(existing_id, source_path)
                 existing_info["size"] = size
                 _save_index(index)
                 return {"id": existing_id, "name": filename, "type": existing_info.get("type", "other"), "overwritten": True}
+    _ensure_storage_capacity(size)
     file_id = str(uuid.uuid4())
     suffix = Path(filename).suffix.lower()
     file_type = {".vtt": "vtt", ".txt": "text", ".mp3": "audio", ".mp4": "video", ".wav": "audio"}.get(suffix, "other")
@@ -290,12 +396,18 @@ def get_file_path(file_id: str) -> Optional[tuple[Path, str]]:
     file_info = index["files"][file_id]
     if _use_gcs():
         blob = _get_bucket().blob(_file_blob_name(file_id))
+        if not blob.exists() and _legacy_ministry_scope():
+            blob = _get_bucket().blob(f"library/files/{file_id}")
         if not blob.exists():
             return None
-        local_path = LIBRARY_CACHE_DIR / file_id
+        cache_dir = LIBRARY_CACHE_DIR / (_tenant_id.get() or "default")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        local_path = cache_dir / file_id
         blob.download_to_filename(str(local_path))
         return local_path, file_info["name"]
-    file_path = LIBRARY_DIR / file_id
+    file_path = _tenant_library_dir() / file_id
+    if not file_path.exists() and _legacy_ministry_scope():
+        file_path = LIBRARY_DIR / file_id
     if not file_path.exists():
         return None
     return file_path, file_info["name"]
@@ -382,6 +494,7 @@ def update_file(file_id: str, file_data: bytes, filename: str | None = None) -> 
         return False
     if _read_file_bytes(file_id) is None:
         return False
+    _ensure_storage_capacity(len(file_data) - int(index["files"][file_id].get("size", 0) or 0))
     _write_file_bytes(file_id, file_data)
     index["files"][file_id]["size"] = len(file_data)
     if filename:
@@ -461,6 +574,7 @@ def copy_file(file_id: str, target_folder: str, new_filename: str | None = None)
     source_bytes = _read_file_bytes(file_id)
     if source_bytes is None:
         return None
+    _ensure_storage_capacity(len(source_bytes))
     new_file_id = str(uuid.uuid4())
     try:
         _write_file_bytes(new_file_id, source_bytes)
@@ -555,6 +669,13 @@ def duplicate_folder(folder_id: str) -> bool:
     parent = _norm_lib_path(info.get("parent", ""))
     old_name = info["name"]
     old_path = f"{parent}/{old_name}".strip("/") if parent else old_name
+    subtree_size = sum(
+        max(0, int(finfo.get("size", 0) or 0))
+        for finfo in index.get("files", {}).values()
+        if _norm_lib_path(finfo.get("folder", "")) == old_path
+        or _norm_lib_path(finfo.get("folder", "")).startswith(old_path + "/")
+    )
+    _ensure_storage_capacity(subtree_size)
 
     sibling_names = {
         finfo["name"]

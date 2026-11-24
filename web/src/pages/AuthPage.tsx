@@ -24,7 +24,7 @@ export function AuthPage() {
       if (tab === 'login') await signInEmail(email.trim(), password);
       else {
         await signUpEmail(email.trim(), password);
-        setInfo('Compte créé. Vous êtes connecté.');
+        setInfo('Compte créé. Vérifiez le lien envoyé par e-mail, puis connectez-vous.');
       }
     } catch (e) {
       const err = e as { code?: string; message?: string };

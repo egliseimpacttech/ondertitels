@@ -117,6 +117,11 @@ GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "")
 _DEFAULT_FIREBASE_PROJECT_ID = "ondertitels-1"
 FIREBASE_PROJECT_ID = (os.getenv("FIREBASE_PROJECT_ID", "") or "").strip() or _DEFAULT_FIREBASE_PROJECT_ID
 
+# Stripe subscriptions for church workspaces.
+STRIPE_SECRET_KEY = (os.getenv("STRIPE_SECRET_KEY", "") or "").strip()
+STRIPE_WEBHOOK_SECRET = (os.getenv("STRIPE_WEBHOOK_SECRET", "") or "").strip()
+APP_BASE_URL = (os.getenv("APP_BASE_URL", "") or "").strip()
+
 # Allowlist (comma-separated emails). If empty: allow any Firebase user.
 ALLOWED_EMAILS = os.getenv("ALLOWED_EMAILS", "")
 
