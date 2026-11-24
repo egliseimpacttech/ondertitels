@@ -555,7 +555,7 @@ def _cinema_catalog_row(file_id: str, finfo: dict) -> dict | None:
         return None
     if t == "text" and not nl.endswith(".txt"):
         return None
-    if t == "audio" and not nl.endswith((".mp3", ".wav")):
+    if t == "audio" and not nl.endswith((".mp3", ".wav", ".m4a")):
         return None
     title = (finfo.get("cinema_title") or "").strip() or name
     desc = (finfo.get("cinema_description") or "").strip()
@@ -1207,8 +1207,8 @@ async def upload_and_generate(
     """
     # Validate file type
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in (".mp4", ".mp3", ".mpeg", ".wav"):
-        raise HTTPException(400, f"Unsupported file type: {suffix}. Only MP4, MP3, or WAV allowed.")
+    if suffix not in (".mp4", ".mp3", ".mpeg", ".wav", ".m4a"):
+        raise HTTPException(400, f"Unsupported file type: {suffix}. Only MP4, MP3, WAV, or M4A allowed.")
 
     # Validate languages
     lang_codes = [x.strip().lower() for x in languages.split(",") if x.strip()]
@@ -1301,8 +1301,8 @@ async def transcribe_only(request: Request, file: UploadFile = File(...), isolat
     Returns job_id; poll /api/status/{job_id}; download VTT from /api/result/{job_id}.vtt
     """
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in (".mp4", ".mp3", ".mpeg", ".wav"):
-        raise HTTPException(400, "Only MP4, MP3, or WAV allowed.")
+    if suffix not in (".mp4", ".mp3", ".mpeg", ".wav", ".m4a"):
+        raise HTTPException(400, "Only MP4, MP3, WAV, or M4A allowed.")
 
     job_id = str(uuid.uuid4())
     upload_path = config.UPLOAD_DIR / f"{job_id}{suffix}"
@@ -1352,8 +1352,8 @@ async def transcribe_only_from_library(
     lib_path, filename = lib
 
     suffix = Path(filename).suffix.lower()
-    if suffix not in (".mp4", ".mp3", ".mpeg", ".wav"):
-        raise HTTPException(400, "Only MP4, MP3, or WAV allowed.")
+    if suffix not in (".mp4", ".mp3", ".mpeg", ".wav", ".m4a"):
+        raise HTTPException(400, "Only MP4, MP3, WAV, or M4A allowed.")
 
     job_id = str(uuid.uuid4())
     upload_path = config.UPLOAD_DIR / f"{job_id}{suffix}"
@@ -1396,8 +1396,8 @@ async def transcribe_text_only(
     Returns job_id; poll /api/status/{job_id}; download TXT from /api/result/{job_id}.txt
     """
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in (".mp4", ".mp3", ".mpeg", ".wav"):
-        raise HTTPException(400, "Only MP4, MP3, or WAV allowed.")
+    if suffix not in (".mp4", ".mp3", ".mpeg", ".wav", ".m4a"):
+        raise HTTPException(400, "Only MP4, MP3, WAV, or M4A allowed.")
 
     job_id = str(uuid.uuid4())
     upload_path = config.UPLOAD_DIR / f"{job_id}{suffix}"
@@ -1449,8 +1449,8 @@ async def transcribe_text_only_from_library(
     lib_path, filename = lib
 
     suffix = Path(filename).suffix.lower()
-    if suffix not in (".mp4", ".mp3", ".mpeg", ".wav"):
-        raise HTTPException(400, "Only MP4, MP3, or WAV allowed.")
+    if suffix not in (".mp4", ".mp3", ".mpeg", ".wav", ".m4a"):
+        raise HTTPException(400, "Only MP4, MP3, WAV, or M4A allowed.")
 
     job_id = str(uuid.uuid4())
     upload_path = config.UPLOAD_DIR / f"{job_id}{suffix}"
@@ -1527,8 +1527,8 @@ async def gcs_upload_url(
     try:
         bucket = _get_gcs_bucket()
         suffix = Path(filename or "").suffix.lower()
-        if suffix not in (".mp4", ".mp3", ".mpeg", ".wav", ".vtt", ".txt", ".webm", ".mkv"):
-            raise HTTPException(400, "Only MP4, MP3, MPEG, WAV, WebM, MKV, VTT, or TXT allowed.")
+        if suffix not in (".mp4", ".mp3", ".mpeg", ".wav", ".m4a", ".vtt", ".txt", ".webm", ".mkv"):
+            raise HTTPException(400, "Only MP4, MP3, MPEG, WAV, M4A, WebM, MKV, VTT, or TXT allowed.")
 
         object_name = f"library/files/upload_{uuid.uuid4()}{suffix}"
         blob = bucket.blob(object_name)
@@ -1593,8 +1593,8 @@ async def gcs_resumable_session(
     try:
         bucket = _get_gcs_bucket()
         suffix = Path(filename or "").suffix.lower()
-        if suffix not in (".mp4", ".mp3", ".mpeg", ".wav", ".vtt", ".txt", ".webm", ".mkv"):
-            raise HTTPException(400, "Only MP4, MP3, MPEG, WAV, WebM, MKV, VTT, or TXT allowed.")
+        if suffix not in (".mp4", ".mp3", ".mpeg", ".wav", ".m4a", ".vtt", ".txt", ".webm", ".mkv"):
+            raise HTTPException(400, "Only MP4, MP3, MPEG, WAV, M4A, WebM, MKV, VTT, or TXT allowed.")
         object_name = f"library/files/upload_{uuid.uuid4()}{suffix}"
         blob = bucket.blob(object_name)
         session_url = blob.create_resumable_upload_session(
@@ -1713,8 +1713,8 @@ async def transcribe_only_gcs(
     so the browser can poll /api/status/{job_id} while the file is copied from GCS.
     """
     suffix = Path(object_name or "").suffix.lower()
-    if suffix not in (".mp4", ".mp3", ".mpeg", ".wav"):
-        raise HTTPException(400, "Only MP4, MP3, or WAV allowed.")
+    if suffix not in (".mp4", ".mp3", ".mpeg", ".wav", ".m4a"):
+        raise HTTPException(400, "Only MP4, MP3, WAV, or M4A allowed.")
 
     job_id = str(uuid.uuid4())
     upload_path = config.UPLOAD_DIR / f"{job_id}{suffix}"
@@ -1801,8 +1801,8 @@ async def transcribe_text_only_gcs(
     Returns job_id immediately; GCS download + transcription run in a background thread.
     """
     suffix = Path(object_name or "").suffix.lower()
-    if suffix not in (".mp4", ".mp3", ".mpeg", ".wav"):
-        raise HTTPException(400, "Only MP4, MP3, or WAV allowed.")
+    if suffix not in (".mp4", ".mp3", ".mpeg", ".wav", ".m4a"):
+        raise HTTPException(400, "Only MP4, MP3, WAV, or M4A allowed.")
 
     job_id = str(uuid.uuid4())
     upload_path = config.UPLOAD_DIR / f"{job_id}{suffix}"
@@ -2887,7 +2887,7 @@ async def stream_cinema_audio(file_id: str):
         raise HTTPException(404, "Audio not found")
     file_path, filename = result
     suffix = Path(filename).suffix.lower()
-    media_type = {".mp3": "audio/mpeg", ".wav": "audio/wav"}.get(suffix, "application/octet-stream")
+    media_type = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4"}.get(suffix, "application/octet-stream")
     return FileResponse(
         path=file_path,
         media_type=media_type,
@@ -3744,8 +3744,8 @@ async def upload_to_library(
     """Upload a file to the library."""
     original_name = file.filename or "file"
     suffix = Path(original_name).suffix.lower()
-    if suffix not in (".vtt", ".txt", ".mp3", ".mp4", ".wav"):
-        raise HTTPException(400, "Only VTT, TXT, MP3, MPEG, MP4, or WAV files allowed.")
+    if suffix not in (".vtt", ".txt", ".mp3", ".mp4", ".wav", ".m4a"):
+        raise HTTPException(400, "Only VTT, TXT, MP3, MPEG, MP4, WAV, or M4A files allowed.")
 
     desired_name = (filename or "").strip()
     if desired_name:
@@ -3858,8 +3858,8 @@ async def import_to_library_from_gcs(
 
         source_name = Path(object_name).name
         source_suffix = Path(source_name).suffix.lower()
-        if source_suffix not in (".vtt", ".txt", ".mp3", ".mp4", ".wav"):
-            raise HTTPException(400, "Only VTT, TXT, MP3, MPEG, MP4, or WAV files allowed.")
+        if source_suffix not in (".vtt", ".txt", ".mp3", ".mp4", ".wav", ".m4a"):
+            raise HTTPException(400, "Only VTT, TXT, MP3, MPEG, MP4, WAV, or M4A files allowed.")
 
         desired_name = (filename or "").strip()
         if desired_name:
@@ -3912,13 +3912,14 @@ async def download_library_file(request: Request, file_id: str):
         ".mp3": "audio/mpeg",
         ".mp4": "video/mp4",
         ".wav": "audio/wav",
+        ".m4a": "audio/mp4",
     }.get(suffix, "application/octet-stream")
 
     # Inline playback for <video>/<audio> when opened from the app (token or explicit inline=1).
     want_inline = (request.query_params.get("inline") == "1") or bool(
         (request.query_params.get("token") or "").strip()
     )
-    if want_inline and suffix in (".mp4", ".webm", ".mp3", ".wav"):
+    if want_inline and suffix in (".mp4", ".webm", ".mp3", ".wav", ".m4a"):
         disp = "inline"
     else:
         disp = "attachment"

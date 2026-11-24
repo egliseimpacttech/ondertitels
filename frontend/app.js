@@ -1,23 +1,27 @@
-﻿import { initializeApp } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-app.js";
+﻿import { initializeApp } from "https://www.gstatic.com/firebasejs/13.0.0/firebase-app.js";
+import { getAnalytics, isSupported as analyticsIsSupported } from "https://www.gstatic.com/firebasejs/13.0.0/firebase-analytics.js";
 import {
   getAuth,
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
-} from "https://www.gstatic.com/firebasejs/12.11.0/firebase-auth.js";
+} from "https://www.gstatic.com/firebasejs/13.0.0/firebase-auth.js";
 
     const firebaseConfig = {
-      apiKey: "AIzaSyCqd17ac8mHZkRUDi0G85P6zjuzSG3ktd8",
-      authDomain: "itech-workspace-8da4f.firebaseapp.com",
-      projectId: "itech-workspace-8da4f",
-      storageBucket: "itech-workspace-8da4f.firebasestorage.app",
-      messagingSenderId: "512996235945",
-      appId: "1:512996235945:web:792379ec240fbed8e427b8",
-      measurementId: "G-N3B77WJGMH"
+      apiKey: "AIzaSyCfDgHVodELAgjc48FRDgSDuq7WIzs4iq0",
+      authDomain: "ondertitels-1.firebaseapp.com",
+      projectId: "ondertitels-1",
+      storageBucket: "ondertitels-1.firebasestorage.app",
+      messagingSenderId: "807675502591",
+      appId: "1:807675502591:web:ad229e10c84135a4dc11ca",
+      measurementId: "G-77EP76LQCE"
     };
 
     const firebaseApp = initializeApp(firebaseConfig);
+    void analyticsIsSupported().then((supported) => {
+      if (supported) getAnalytics(firebaseApp);
+    }).catch(() => {});
     const fbAuth = getAuth(firebaseApp);
     /** Wait for first auth snapshot (persistence loaded). CDN build may not export authStateReady. */
     const firebaseAuthReady = new Promise((resolve) => {
@@ -615,7 +619,7 @@ import {
         return;
       }
       if (!mediaType || !['video', 'text', 'audio'].includes(mediaType)) {
-        alert('Le Cinéma accepte seulement des vidéos, fichiers texte (.txt) et audio (.mp3, .wav).');
+        alert('Le Cinéma accepte seulement des vidéos, fichiers texte (.txt) et audio (.mp3, .wav, .m4a).');
         return;
       }
       openCinemaPublishModal(fileId);

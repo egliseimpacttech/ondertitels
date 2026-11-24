@@ -49,48 +49,90 @@ export async function runJob(opts: RunJobOptions): Promise<void> {
 
   const jobId = data.job_id as string;
   const statusUrl = `${apiBase}/api/status/${jobId}`;
-  let statusPollErrors = 0;
-
-  await new Promise<void>((resolve, reject) => {
-    const tick = async () => {
-      if (opts.signal?.aborted) {
-        clearInterval(intervalId);
-        reject(new Error('Annulé'));
-        return;
-      }
-      try {
-        const statusRes = await apiFetch(statusUrl);
-        if (!statusRes.ok) {
-          clearInterval(intervalId);
-          reject(new Error('Tâche introuvable. Le serveur a peut-être redémarré. Veuillez réessayer.'));
-          return;
-        }
-        statusPollErrors = 0;
-        const s = (await statusRes.json()) as JobStatus;
-        opts.onProgress({
-          phase: s.done ? (s.error ? 'error' : 'done') : 'running',
-          progress: s.progress || 0,
-          message: `${s.progress || 0}% — ${s.message || ''}${formatEta(s.eta_seconds)}`,
-          warning: s.warning,
-          jobId,
-          downloadUrl: s.done && !s.error ? `${apiBase}/api/result/${jobId}${resultUrlSuffix}` : undefined,
-          downloadName: finalDownloadName,
-          resultSuffix: resultUrlSuffix,
-        });
-        if (s.done) {
-          clearInterval(intervalId);
-          if (s.error) reject(new Error(s.error || s.message || 'Erreur'));
-          else resolve();
-        }
-      } catch (err) {
-        statusPollErrors += 1;
-        if (statusPollErrors >= 5) {
-          clearInterval(intervalId);
-          reject(err instanceof Error ? err : new Error('Connexion perdue pendant le suivi.'));
-        }
-      }
-    };
-    void tick();
-    const intervalId = setInterval(() => void tick(), 1000);
+  let consecutiveErrors = 0;
+  let lastProgress = 0;
+  opts.onProgress({
+    phase: 'running',
+    progress: lastProgress,
+    message: 'Tâche démarrée — attente du statut…',
+    jobId,
+    downloadName: finalDownloadName,
+    resultSuffix: resultUrlSuffix,
   });
+
+  while (true) {
+    if (opts.signal?.aborted) throw new Error('Annulé');
+
+    let statusRes: Response;
+    try {
+      statusRes = await apiFetch(statusUrl);
+    } catch {
+      consecutiveErrors += 1;
+      opts.onProgress({
+        phase: 'running',
+        progress: lastProgress,
+        message: `Connexion interrompue, nouvelle tentative (${consecutiveErrors})…`,
+        jobId,
+        downloadName: finalDownloadName,
+        resultSuffix: resultUrlSuffix,
+      });
+      await new Promise((resolve) => setTimeout(resolve, Math.min(30000, 1000 * 2 ** Math.min(consecutiveErrors - 1, 5))));
+      continue;
+    }
+
+    if (!statusRes.ok) {
+      if (statusRes.status === 404) {
+        throw new Error('Tâche introuvable. Le serveur a peut-être redémarré. Veuillez réessayer.');
+      }
+      if (statusRes.status !== 429 && statusRes.status < 500) {
+        throw new Error(`Échec du suivi de la tâche : ${statusRes.status}`);
+      }
+      consecutiveErrors += 1;
+      opts.onProgress({
+        phase: 'running',
+        progress: lastProgress,
+        message: `Serveur indisponible, nouvelle tentative (${consecutiveErrors})…`,
+        jobId,
+        downloadName: finalDownloadName,
+        resultSuffix: resultUrlSuffix,
+      });
+      await new Promise((resolve) => setTimeout(resolve, Math.min(30000, 1000 * 2 ** Math.min(consecutiveErrors - 1, 5))));
+      continue;
+    }
+
+    let s: JobStatus;
+    try {
+      s = (await statusRes.json()) as JobStatus;
+    } catch {
+      consecutiveErrors += 1;
+      opts.onProgress({
+        phase: 'running',
+        progress: lastProgress,
+        message: `Statut illisible, nouvelle tentative (${consecutiveErrors})…`,
+        jobId,
+        downloadName: finalDownloadName,
+        resultSuffix: resultUrlSuffix,
+      });
+      await new Promise((resolve) => setTimeout(resolve, Math.min(30000, 1000 * 2 ** Math.min(consecutiveErrors - 1, 5))));
+      continue;
+    }
+
+    consecutiveErrors = 0;
+    lastProgress = s.progress || 0;
+    opts.onProgress({
+      phase: s.done ? (s.error ? 'error' : 'done') : 'running',
+      progress: lastProgress,
+      message: `${lastProgress}% — ${s.message || ''}${formatEta(s.eta_seconds)}`,
+      warning: s.warning,
+      jobId,
+      downloadUrl: s.done && !s.error ? `${apiBase}/api/result/${jobId}${resultUrlSuffix}` : undefined,
+      downloadName: finalDownloadName,
+      resultSuffix: resultUrlSuffix,
+    });
+    if (s.done) {
+      if (s.error) throw new Error(s.error || s.message || 'Erreur');
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
 }

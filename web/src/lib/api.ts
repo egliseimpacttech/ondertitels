@@ -57,7 +57,7 @@ export async function downloadViaApi(url: string, filename = ''): Promise<void> 
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(objectUrl);
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
 }
 
 export async function fetchLibraryFileBlob(fileId: string): Promise<Blob> {

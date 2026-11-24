@@ -1,4 +1,4 @@
-import { apiBase, apiFetch, fetchLibraryFileBlob } from '@/lib/api';
+import { apiBase, apiFetch, fetchLibraryFileBlob, readErrorDetail } from '@/lib/api';
 import type { FileSource } from '@/types';
 
 export async function resolveAsFile(source: FileSource, fieldHint = 'file'): Promise<File> {
@@ -18,13 +18,13 @@ export async function saveJobToLibrary(jobId: string, filename: string, suffix: 
     return;
   }
   const res = await apiFetch(`${apiBase}/api/result/${jobId}${suffix}`);
-  if (!res.ok) throw new Error('Impossible de récupérer le résultat');
+  if (!res.ok) throw new Error(await readErrorDetail(res));
   const blob = await res.blob();
   const formData = new FormData();
   formData.append('file', blob, filename);
   formData.append('folder', '');
   const up = await apiFetch(`${apiBase}/api/library/upload`, { method: 'POST', body: formData });
-  if (!up.ok) throw new Error('Échec de l’enregistrement');
+  if (!up.ok) throw new Error(await readErrorDetail(up));
   alert('Enregistré dans la bibliothèque.');
 }
 

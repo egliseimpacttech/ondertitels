@@ -8,6 +8,8 @@ elevenlabs>=1.0.0
 huggingface_hub>=0.26.0
 # Local offline ASR (no API cost)
 faster-whisper>=1.0.0
+# faster-whisper passes metadata_errors to av.open; PyAV 19 rejects it.
+av>=11,<19
 
 # Translation
 deepl>=1.16.0

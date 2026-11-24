@@ -78,7 +78,7 @@
         <input type="text" id="homeUploadFilename" placeholder="ex. sermon_01.mp4">
         <label style="margin-top: 12px;">Fichier</label>
         <div class="file-source">
-          <input type="file" id="homeUploadInput" accept=".vtt,.txt,.mp3,.mp4,.wav" style="display:none;">
+          <input type="file" id="homeUploadInput" accept=".vtt,.txt,.mp3,.mp4,.wav,.m4a" style="display:none;">
           <button type="button" class="secondary small" id="homeChooseFileBtn">Choisir un fichier</button>
           <button type="button" id="homeUploadBtn">Envoyer vers la bibliothèque</button>
           <div class="file-source-info" id="homeUploadInfo">Aucun fichier sélectionné</div>
@@ -89,7 +89,7 @@
       <!-- Transcription: VTT or TXT -->
       <div class="section">
         <div class="section-header">Transcription</div>
-        <p>Téléversez un fichier audio ou vidéo (.mp3, .mp4, .wav). Indiquez si vous voulez des sous-titres horodatés (VTT) ou un texte continu (TXT).</p>
+        <p>Téléversez un fichier audio ou vidéo (.mp3, .mp4, .wav, .m4a). Indiquez si vous voulez des sous-titres horodatés (VTT) ou un texte continu (TXT).</p>
         <form id="transcribeForm">
           <fieldset class="transcribe-output-fieldset">
             <legend>Format de sortie</legend>
@@ -98,7 +98,7 @@
           </fieldset>
           <label>Fichier audio ou vidéo</label>
           <div class="file-source">
-            <input type="file" id="transcribeFileInput" accept=".mp4,.mp3,.wav" style="display:none;">
+            <input type="file" id="transcribeFileInput" accept=".mp4,.mp3,.wav,.m4a" style="display:none;">
             <button type="button" class="secondary small" onclick="document.getElementById('transcribeFileInput').click()">Depuis l’ordinateur</button>
             <button type="button" class="secondary small" onclick="openLibPicker('transcribe', 'audio,video')">Depuis la bibliothèque</button>
             <div class="file-source-info" id="transcribeFileInfo">Aucun fichier sélectionné</div>
@@ -276,7 +276,7 @@
         <button type="button" class="secondary" id="libNewFolderBtn">Nouveau dossier</button>
         <input type="text" id="libUploadFilename" placeholder="Nom facultatif pour un seul fichier (ex. sermon_01.mp4)" style="padding:8px 12px; border:1px solid #000; font-family:inherit; min-width:320px;">
         <label style="margin: 0;">
-          <input type="file" id="libUploadInput" accept=".vtt,.txt,.mp3,.mp4,.wav" style="display: none;" multiple>
+          <input type="file" id="libUploadInput" accept=".vtt,.txt,.mp3,.mp4,.wav,.m4a" style="display: none;" multiple>
           <button type="button" class="secondary" onclick="document.getElementById('libUploadInput').click()">Téléverser des fichiers</button>
         </label>
       </div>

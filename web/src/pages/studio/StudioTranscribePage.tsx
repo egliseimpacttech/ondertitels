@@ -110,7 +110,7 @@ export function StudioTranscribePage() {
       <div className="field">
         <span>Fichier audio ou vidéo</span>
         <FileSourcePicker
-          accept=".mp4,.mp3,.wav"
+          accept=".mp4,.mp3,.wav,.m4a"
           source={file}
           onLocalFile={(f) => setFile({ kind: 'local', file: f })}
           onOpenLibrary={() => setPickerOpen(true)}

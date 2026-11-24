@@ -92,7 +92,7 @@ export function StudioUploadPage() {
         <input
           ref={inputRef}
           type="file"
-          accept=".vtt,.txt,.mp3,.mp4,.wav"
+          accept=".vtt,.txt,.mp3,.mp4,.wav,.m4a"
           style={{ display: 'none' }}
           onChange={(e) => {
             const f = e.target.files?.[0];

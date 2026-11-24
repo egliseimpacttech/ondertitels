@@ -1,0 +1,13 @@
+controle voor verwerking ipv erna
+audio uit video extraheren
+Nouveau dossier -> creer
+een process kunnen stoppen bv als iets aan het uploaden is en je vergist
+process stopt als je naar een andere pagina gaat 
+m4a not accepted (enkel mp3 of wav) OK
+m4a -> converteren
+VTT audio -> recording space 
+in workspace: drafts met notities 
+firebase OK
+ondertitels downloaden of in de bib zetten 
+-> dan ook een melding krijgen dat het geslaagd is 
+wachtwoord moet zichtbaar zijn met eenoogje

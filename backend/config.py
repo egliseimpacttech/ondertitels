@@ -114,7 +114,7 @@ GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "")
 # Firebase Authentication (email magic link).
 # Must match the Firebase project used by the web client. If Cloud Run's GCP project
 # differs from the Firebase project ID, token verification fails unless this is set.
-_DEFAULT_FIREBASE_PROJECT_ID = "itech-workspace-8da4f"
+_DEFAULT_FIREBASE_PROJECT_ID = "ondertitels-1"
 FIREBASE_PROJECT_ID = (os.getenv("FIREBASE_PROJECT_ID", "") or "").strip() or _DEFAULT_FIREBASE_PROJECT_ID
 
 # Allowlist (comma-separated emails). If empty: allow any Firebase user.

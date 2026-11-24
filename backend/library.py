@@ -245,7 +245,7 @@ def upload_file(file_data: bytes, filename: str, folder_path: str = "", overwrit
                 return {"id": existing_id, "name": filename, "type": existing_info.get("type", "other"), "overwritten": True}
     file_id = str(uuid.uuid4())
     suffix = Path(filename).suffix.lower()
-    file_type = {".vtt": "vtt", ".txt": "text", ".mp3": "audio", ".mp4": "video", ".wav": "audio"}.get(suffix, "other")
+    file_type = {".vtt": "vtt", ".txt": "text", ".mp3": "audio", ".mp4": "video", ".wav": "audio", ".m4a": "audio"}.get(suffix, "other")
     _write_file_bytes(file_id, file_data)
     index.setdefault("files", {})[file_id] = {"name": filename, "type": file_type, "folder": folder_path, "size": len(file_data)}
     _save_index(index)
@@ -387,7 +387,7 @@ def update_file(file_id: str, file_data: bytes, filename: str | None = None) -> 
     if filename:
         index["files"][file_id]["name"] = filename
         suffix = Path(filename).suffix.lower()
-        index["files"][file_id]["type"] = {".vtt": "vtt", ".txt": "text", ".mp3": "audio", ".mp4": "video", ".wav": "audio"}.get(suffix, "other")
+        index["files"][file_id]["type"] = {".vtt": "vtt", ".txt": "text", ".mp3": "audio", ".mp4": "video", ".wav": "audio", ".m4a": "audio"}.get(suffix, "other")
     _save_index(index)
     return True
 

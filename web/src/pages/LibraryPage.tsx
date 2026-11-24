@@ -204,7 +204,7 @@ export function LibraryPage() {
           ref={uploadRef}
           type="file"
           multiple
-          accept=".vtt,.txt,.mp3,.mp4,.wav"
+          accept=".vtt,.txt,.mp3,.mp4,.wav,.m4a"
           style={{ display: 'none' }}
           onChange={(e) => {
             if (e.target.files) void uploadFiles(e.target.files);
