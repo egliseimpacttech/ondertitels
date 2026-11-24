@@ -16,7 +16,7 @@ if (!firebaseApiKey) {
 }
 
 const firebaseConfig = {
-  apiKey: firebaseApiKey,
+  apiKey: 'AIzaSyCfDgHVodELAgjc48FRDgSDuq7WIzs4iq0',
   authDomain: 'ondertitels-1.firebaseapp.com',
   projectId: 'ondertitels-1',
   storageBucket: 'ondertitels-1.firebasestorage.app',
