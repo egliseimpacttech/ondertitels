@@ -1,5 +1,6 @@
 """Translation: DeepL (NL, EN, PT, ES, ZH, FR, SW) with OpenAI fallback; OpenAI for Malgasy/Kikongo/Tshiluba (strong model) and Lingala (lighter)."""
 import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict
 
 import deepl
@@ -14,6 +15,7 @@ from .config import (
 
 # Use full gpt-4o-class model + French-unknown-word rule for these targets
 OPENAI_STRONG_AFRICAN_LANGS = frozenset({"mg", "kg", "ts"})
+LINGALA_TRANSLATION_CONCURRENCY = 3
 
 # Simple in-memory cache for translations (key: hash of text+lang, value: translated text)
 _translation_cache: Dict[str, str] = {}
@@ -234,6 +236,69 @@ def _translate_openai(
         client = OpenAI(api_key=api_key)
         out: list[str] = []
         n = total or len(texts)
+
+        if target_lang == "ln":
+            out = [""] * len(texts)
+            pending = {}
+            completed = 0
+
+            def translate_lingala_segment(index: int, text: str) -> tuple[int, str]:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": _sanitize_user_text(text)},
+                    ],
+                )
+                translated = (response.choices[0].message.content or "").strip()
+                if not translated and text.strip():
+                    raise ValueError("Empty reply from OpenAI.")
+                return index, translated
+
+            for index, text in enumerate(texts):
+                if not text.strip():
+                    out[index] = text
+                    completed += 1
+                    continue
+                cached = _get_cached_translation(
+                    text,
+                    target_lang,
+                    source_lang,
+                    openai_model=model,
+                )
+                if cached is not None:
+                    out[index] = cached
+                    completed += 1
+                    continue
+                pending[index] = text
+
+            if progress_callback and completed:
+                progress_callback(completed, n)
+
+            if pending:
+                with ThreadPoolExecutor(
+                    max_workers=min(LINGALA_TRANSLATION_CONCURRENCY, len(pending))
+                ) as executor:
+                    futures = {
+                        executor.submit(translate_lingala_segment, index, text): (index, text)
+                        for index, text in pending.items()
+                    }
+                    for future in as_completed(futures):
+                        index, translated = future.result()
+                        text = pending[index]
+                        out[index] = translated
+                        _cache_translation(
+                            text,
+                            target_lang,
+                            source_lang,
+                            translated,
+                            openai_model=model,
+                        )
+                        completed += 1
+                        if progress_callback and n:
+                            progress_callback(completed, n)
+            return out
+
         for i, t in enumerate(texts):
             if not t.strip():
                 out.append(t)

@@ -27,6 +27,8 @@ export type Church = {
   has_billing_subscription?: boolean;
 };
 
+export type StorageBackend = 'gcs' | 'local' | 'local_fallback';
+
 type AuthContextValue = {
   user: User | null;
   ready: boolean;
@@ -34,6 +36,8 @@ type AuthContextValue = {
   cinemaOnly: boolean;
   church: Church | null;
   storageUsedBytes: number;
+  storageBackend: StorageBackend;
+  storageWarning: string;
   accessError: string | null;
   signInEmail: (email: string, password: string) => Promise<void>;
   signUpEmail: (email: string, password: string) => Promise<void>;
@@ -50,6 +54,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [cinemaOnly, setCinemaOnly] = useState(false);
   const [church, setChurch] = useState<Church | null>(null);
   const [storageUsedBytes, setStorageUsedBytes] = useState(0);
+  const [storageBackend, setStorageBackend] = useState<StorageBackend>('local');
+  const [storageWarning, setStorageWarning] = useState('');
   const [accessError, setAccessError] = useState<string | null>(null);
 
   const refreshAccessFlags = useCallback(async () => {
@@ -72,10 +78,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         church: Church | null;
         is_admin: boolean;
         storage_used_bytes: number;
+        storage_backend?: StorageBackend;
+        storage_warning?: string;
       };
       setCinemaOnly(false);
       setChurch(data.church);
       setStorageUsedBytes(data.storage_used_bytes || 0);
+      setStorageBackend(data.storage_backend || 'local');
+      setStorageWarning(data.storage_warning || '');
       setIsAdmin(!!data.is_admin);
     } catch (e) {
       setAccessError(
@@ -96,6 +106,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setCinemaOnly(false);
           setChurch(null);
           setStorageUsedBytes(0);
+          setStorageBackend('local');
+          setStorageWarning('');
           setAccessError(null);
         }
         setReady(true);
@@ -112,6 +124,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       cinemaOnly,
       church,
       storageUsedBytes,
+      storageBackend,
+      storageWarning,
       accessError,
       signInEmail: async (email, password) => {
         await signIn(email, password);
@@ -124,7 +138,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
       refreshAccessFlags,
     }),
-    [user, ready, isAdmin, cinemaOnly, church, storageUsedBytes, accessError, refreshAccessFlags],
+    [
+      user,
+      ready,
+      isAdmin,
+      cinemaOnly,
+      church,
+      storageUsedBytes,
+      storageBackend,
+      storageWarning,
+      accessError,
+      refreshAccessFlags,
+    ],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -9,11 +9,13 @@ import { downloadViaApi, isLocalHost } from '@/lib/api';
 import { createResumableSession, uploadResumableWithRetry } from '@/lib/gcs';
 import { runJob, type JobProgress } from '@/lib/jobs';
 import { resolveAsFile } from '@/lib/studio';
+import { useAuth } from '@/context/AuthContext';
 import type { FileSource } from '@/types';
 
 type PickerKind = 'video' | 'vtt' | null;
 
 export function StudioBurnPage() {
+  const { storageBackend } = useAuth();
   const [burnVideo, setBurnVideo] = useState<FileSource | null>(null);
   const [burnVtt, setBurnVtt] = useState<FileSource | null>(null);
   const [progress, setProgress] = useState<JobProgress | null>(null);
@@ -33,6 +35,7 @@ export function StudioBurnPage() {
       const MAX_DIRECT_UPLOAD_MB = 25;
       const videoLarge =
         burnVideo.kind === 'local' &&
+        storageBackend === 'gcs' &&
         !isLocalHost() &&
         (burnVideo.file.size || 0) > MAX_DIRECT_UPLOAD_MB * 1024 * 1024;
 

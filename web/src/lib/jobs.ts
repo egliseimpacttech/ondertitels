@@ -82,10 +82,26 @@ export async function runJob(opts: RunJobOptions): Promise<void> {
 
     if (!statusRes.ok) {
       if (statusRes.status === 404) {
-        throw new Error('Tâche introuvable. Le serveur a peut-être redémarré. Veuillez réessayer.');
+        consecutiveErrors += 1;
+        if (consecutiveErrors >= 5) {
+          throw new Error('Tâche introuvable. Le serveur a peut-être redémarré. Veuillez réessayer.');
+        }
+        opts.onProgress({
+          phase: 'running',
+          progress: lastProgress,
+          message: `Tâche introuvable, nouvelle tentative (${consecutiveErrors})…`,
+          jobId,
+          downloadName: finalDownloadName,
+          resultSuffix: resultUrlSuffix,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 1000 * consecutiveErrors));
+        continue;
       }
       if (statusRes.status !== 429 && statusRes.status < 500) {
-        throw new Error(`Échec du suivi de la tâche : ${statusRes.status}`);
+        const errorData = (await statusRes.json().catch(() => ({}))) as { detail?: string };
+        throw new Error(
+          errorData.detail || `Échec du suivi de la tâche : ${statusRes.status}`,
+        );
       }
       consecutiveErrors += 1;
       opts.onProgress({

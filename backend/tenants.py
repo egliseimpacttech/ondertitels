@@ -37,6 +37,25 @@ def get_church(church_id: str) -> dict[str, Any] | None:
     return {"id": snapshot.id, **(snapshot.to_dict() or {})}
 
 
+def ministry_admin_membership() -> dict[str, str]:
+    return {
+        "church_id": MINISTRY_TENANT_ID,
+        "email": MINISTRY_ADMIN_EMAIL,
+        "role": "admin",
+    }
+
+
+def ministry_workspace() -> dict[str, Any]:
+    return {
+        "id": MINISTRY_TENANT_ID,
+        "name": MINISTRY_NAME,
+        "plan": "free",
+        "subscription_status": "active",
+        "storage_limit_bytes": None,
+        "owner_email": MINISTRY_ADMIN_EMAIL,
+    }
+
+
 def ensure_ministry_membership(email: str, role: str = "member") -> dict[str, Any]:
     """Create the free ministry workspace and its first access record when needed."""
     email = email.strip().lower()

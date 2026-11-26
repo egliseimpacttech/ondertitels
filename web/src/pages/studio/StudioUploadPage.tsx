@@ -10,10 +10,12 @@ import {
   uploadMultipartWithProgress,
 } from '@/lib/api';
 import { createResumableSession, uploadResumableWithRetry } from '@/lib/gcs';
+import { useAuth } from '@/context/AuthContext';
 import { yieldForPaint } from '@/lib/filenames';
 import type { JobProgress } from '@/lib/jobs';
 
 export function StudioUploadPage() {
+  const { storageBackend } = useAuth();
   const inputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [name, setName] = useState('');
@@ -33,7 +35,10 @@ export function StudioUploadPage() {
       await yieldForPaint();
       const desiredName = name.trim();
       const MAX_DIRECT_UPLOAD_MB = 25;
-      const isLarge = !isLocalHost() && (file.size || 0) > MAX_DIRECT_UPLOAD_MB * 1024 * 1024;
+      const isLarge =
+        storageBackend === 'gcs' &&
+        !isLocalHost() &&
+        (file.size || 0) > MAX_DIRECT_UPLOAD_MB * 1024 * 1024;
 
       if (isLarge) {
         setProgress({ phase: 'uploading', progress: 1, message: 'Demande d’URL de stockage…' });

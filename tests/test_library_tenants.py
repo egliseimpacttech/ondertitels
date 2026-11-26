@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from google.api_core.exceptions import Forbidden
 
 from backend import library
 
@@ -12,6 +13,59 @@ def local_library(tmp_path, monkeypatch):
     monkeypatch.setattr(library, "LIBRARY_INDEX", tmp_path / "library_index.json")
     monkeypatch.setattr(library, "LIBRARY_CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(library, "OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(library, "_gcs_fallback_reason", None)
+    monkeypatch.setattr(library, "_gcs_client", None)
+    monkeypatch.setattr(library, "_gcs_bucket", None)
+
+
+def test_gcs_failure_falls_back_to_tenant_local_storage(local_library, monkeypatch):
+    class UnavailableBlob:
+        def exists(self):
+            raise Forbidden("bucket billing disabled")
+
+    class UnavailableBucket:
+        def blob(self, name):
+            return UnavailableBlob()
+
+    monkeypatch.setattr(library, "GCS_BUCKET_NAME", "temporary-placeholder")
+    monkeypatch.setattr(library, "_get_bucket", lambda: UnavailableBucket())
+
+    with library.tenant_scope("church-a", 100):
+        assert library.list_folder()["files"] == []
+        assert library.get_storage_status()["backend"] == "local_fallback"
+        uploaded = library.upload_file(b"local copy", "sermon.vtt")
+        downloaded = library.get_file(uploaded["id"])
+
+    assert downloaded == (b"local copy", "sermon.vtt")
+    assert (library.LIBRARY_DIR / "church-a" / uploaded["id"]).read_bytes() == b"local copy"
+
+
+def test_gcs_write_failure_saves_file_and_index_locally(local_library, monkeypatch):
+    class Blob:
+        def __init__(self, name):
+            self.name = name
+
+        def exists(self):
+            return self.name.endswith("/index.json")
+
+        def download_as_text(self, encoding):
+            return '{"folders": {}, "files": {}}'
+
+        def upload_from_string(self, *args, **kwargs):
+            raise Forbidden("bucket billing disabled")
+
+    class Bucket:
+        def blob(self, name):
+            return Blob(name)
+
+    monkeypatch.setattr(library, "GCS_BUCKET_NAME", "temporary-placeholder")
+    monkeypatch.setattr(library, "_get_bucket", lambda: Bucket())
+
+    with library.tenant_scope("church-a", 100):
+        uploaded = library.upload_file(b"local copy", "sermon.vtt")
+        assert library.get_file(uploaded["id"]) == (b"local copy", "sermon.vtt")
+
+    assert (library.LIBRARY_DIR / "church-a" / "index.json").exists()
 
 
 def test_tenant_libraries_are_isolated(local_library):

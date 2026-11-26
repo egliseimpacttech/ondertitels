@@ -10,13 +10,9 @@ import {
   type User,
 } from 'firebase/auth';
 
-const firebaseApiKey = import.meta.env.VITE_FIREBASE_CONFIG_API_KEY;
-if (!firebaseApiKey) {
-  throw new Error('Set VITE_FIREBASE_CONFIG_API_KEY before building or starting the frontend.');
-}
-
 const firebaseConfig = {
-  apiKey: 'AIzaSyCfDgHVodELAgjc48FRDgSDuq7WIzs4iq0',
+  apiKey:
+    import.meta.env.VITE_FIREBASE_CONFIG_API_KEY || 'AIzaSyCfDgHVodELAgjc48FRDgSDuq7WIzs4iq0',
   authDomain: 'ondertitels-1.firebaseapp.com',
   projectId: 'ondertitels-1',
   storageBucket: 'ondertitels-1.firebasestorage.app',
@@ -36,6 +32,7 @@ export const firebaseAuthReady = new Promise<void>((resolve) => {
     unsub();
     resolve();
   });
+  window.setTimeout(() => resolve(), 8000);
 });
 
 export async function ensureIdToken(forceRefresh = false): Promise<string | null> {

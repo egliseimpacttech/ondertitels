@@ -9,9 +9,11 @@ import { downloadViaApi, isLocalHost } from '@/lib/api';
 import { createResumableSession, uploadResumableWithRetry } from '@/lib/gcs';
 import { runJob, type JobProgress } from '@/lib/jobs';
 import { saveJobToLibrary } from '@/lib/studio';
+import { useAuth } from '@/context/AuthContext';
 import type { FileSource } from '@/types';
 
 export function StudioTranscribePage() {
+  const { storageBackend } = useAuth();
   const [file, setFile] = useState<FileSource | null>(null);
   const [output, setOutput] = useState<'vtt' | 'txt'>('vtt');
   const [isolateVoice, setIsolateVoice] = useState(false);
@@ -34,6 +36,7 @@ export function StudioTranscribePage() {
       const MAX_DIRECT_UPLOAD_MB = 25;
       const localLarge =
         file.kind === 'local' &&
+        storageBackend === 'gcs' &&
         !isLocalHost() &&
         (file.file.size || 0) > MAX_DIRECT_UPLOAD_MB * 1024 * 1024;
 

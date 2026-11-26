@@ -24,6 +24,8 @@ from fastapi import File, Form, FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import google.auth
+from google.auth import exceptions as google_auth_exceptions
+from google.auth.exceptions import DefaultCredentialsError
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.api_core.exceptions import GoogleAPIError
 from google.cloud import storage
@@ -64,6 +66,7 @@ logger = logging.getLogger("ondertitels")
 @app.on_event("startup")
 async def _warmup_local_models() -> None:
     """Preload faster-whisper so the first live chunk is not a cold download."""
+    _fail_incomplete_jobs_after_restart()
     if not config.LOCAL_INFERENCE:
         return
     if not local_asr_available():
@@ -225,6 +228,18 @@ async def _firebase_auth_middleware(request: Request, call_next):
         
         try:
             claims = _verify_firebase_id_token(token)
+        except (
+            firebase_auth.CertificateFetchError,
+            google_auth_exceptions.TransportError,
+        ) as e:
+            logger.warning("Firebase token verification temporarily unavailable: %s", type(e).__name__)
+            return JSONResponse(
+                {
+                    "detail": "La vérification Firebase est temporairement indisponible. Réessayez dans un instant.",
+                    "code": "auth_verification_unavailable",
+                },
+                status_code=503,
+            )
         except Exception as e:
             logger.warning("Firebase token verify failed: %s", type(e).__name__)
             return JSONResponse(
@@ -247,7 +262,10 @@ async def _firebase_auth_middleware(request: Request, call_next):
         request.state.tenant = None
         request.state.tenant_role = None
         try:
-            membership = tenants.get_membership(email) if email else None
+            if email == tenants.MINISTRY_ADMIN_EMAIL:
+                membership = tenants.ministry_admin_membership()
+            else:
+                membership = tenants.get_membership(email) if email else None
             if not membership and email:
                 configured_emails = {
                     item.strip().lower()
@@ -255,9 +273,7 @@ async def _firebase_auth_middleware(request: Request, call_next):
                     for item in (raw or "").split(",")
                     if item.strip()
                 }
-                if email == tenants.MINISTRY_ADMIN_EMAIL:
-                    membership = tenants.ensure_ministry_membership(email, "admin")
-                elif email in configured_emails:
+                if email in configured_emails:
                     role = "admin" if _is_admin_email(email) else "member"
                     membership = tenants.ensure_ministry_membership(email, role)
         except Exception as e:
@@ -270,7 +286,10 @@ async def _firebase_auth_middleware(request: Request, call_next):
         if membership:
             church_id = str(membership.get("church_id") or "")
             try:
-                church = tenants.get_church(church_id) if church_id else None
+                if email == tenants.MINISTRY_ADMIN_EMAIL:
+                    church = tenants.ministry_workspace()
+                else:
+                    church = tenants.get_church(church_id) if church_id else None
             except Exception:
                 logger.exception("Could not load church workspace.")
                 return JSONResponse(
@@ -391,18 +410,32 @@ async def _storage_limit_handler(request: Request, exc: library.StorageLimitExce
 
 # In-memory progress per job: { job_id: { progress, message, done, error?, eta_seconds? } }
 job_progress: dict[str, dict] = {}
+_LOCAL_JOBS_DIR = config.OUTPUT_DIR / "jobs"
+_LOCAL_JOBS_DIR.mkdir(exist_ok=True)
+_RESTART_JOB_ERROR = "Le serveur a redémarré. Relancez la tâche."
+
+
+def _local_job_path(job_id: str) -> Path:
+    return _LOCAL_JOBS_DIR / f"{job_id}.json"
+
 
 def _persist_job_progress(job_id: str, payload: dict) -> None:
     """
-    Persist progress to GCS so polling works across Cloud Run instances/restarts.
-    Best-effort: failures shouldn't crash the job.
+    Persist progress so polling survives local uvicorn reloads (disk) and
+    Cloud Run instance hops (GCS). Best-effort: failures shouldn't crash the job.
     """
+    try:
+        _local_job_path(job_id).write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
     try:
         bucket = _get_gcs_bucket()
         blob = bucket.blob(f"jobs/{job_id}.json")
         blob.upload_from_string(json.dumps(payload, ensure_ascii=False), content_type="application/json")
     except Exception:
-        # Avoid log spam; polling will still work on the same instance via memory.
         return
 
 
@@ -413,6 +446,12 @@ def set_job_progress(job_id: str, payload: dict) -> None:
 
 def _load_persisted_job_progress(job_id: str) -> dict | None:
     try:
+        path = _local_job_path(job_id)
+        if path.is_file():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    try:
         bucket = _get_gcs_bucket()
         blob = bucket.blob(f"jobs/{job_id}.json")
         if not blob.exists():
@@ -421,6 +460,34 @@ def _load_persisted_job_progress(job_id: str) -> dict | None:
         return json.loads(data.decode("utf-8"))
     except Exception:
         return None
+
+
+def _fail_incomplete_jobs_after_restart() -> None:
+    """Mark jobs interrupted by a process restart so the UI does not poll forever."""
+    try:
+        paths = list(_LOCAL_JOBS_DIR.glob("*.json"))
+    except Exception:
+        return
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict) or data.get("done"):
+            continue
+        data.update(
+            {
+                "done": True,
+                "error": _RESTART_JOB_ERROR,
+                "message": _RESTART_JOB_ERROR,
+                "eta_seconds": None,
+            }
+        )
+        try:
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+        job_progress[path.stem] = data
 
 
 GCS_JOB_RESULTS_PREFIX = "job_results"
@@ -2951,7 +3018,7 @@ async def stream_cinema_video(video_id: str):
     """Stream a published Cinema video. Uses direct GCS signed URL when bucket is configured."""
     if not _cinema_item_is_public(video_id, ("video",)):
         raise HTTPException(404, "Video not found")
-    if (config.GCS_BUCKET_NAME or "").strip():
+    if library.is_gcs_active():
         url = _signed_gcs_get_url(library.file_storage_blob_name(video_id), expires_seconds=1800)
         return RedirectResponse(url=url, status_code=307)
     result = library.get_file_path(video_id)
@@ -2977,7 +3044,7 @@ async def stream_cinema_audio(file_id: str):
     """Stream a published Cinema audio file (MP3/WAV)."""
     if not _cinema_item_is_public(file_id, ("audio",)):
         raise HTTPException(404, "Audio not found")
-    if (config.GCS_BUCKET_NAME or "").strip():
+    if library.is_gcs_active():
         url = _signed_gcs_get_url(library.file_storage_blob_name(file_id), expires_seconds=1800)
         return RedirectResponse(url=url, status_code=307)
     result = library.get_file_path(file_id)
@@ -3079,7 +3146,7 @@ async def watch_video_with_subtitles(request: Request, video_id: str, lang: str 
             eff_lang = next(iter(subs.keys()))
             vtt_id = subs.get(eff_lang)
 
-    if (config.GCS_BUCKET_NAME or "").strip():
+    if library.is_gcs_active():
         video_src = _signed_gcs_get_url(library.file_storage_blob_name(video_id), expires_seconds=1800)
     else:
         video_src = f"/api/cinema/video/{video_id}"
@@ -3583,6 +3650,18 @@ async def tenant_status(request: Request):
     church = getattr(request.state, "tenant", None)
     if not church:
         return {"church": None, "is_admin": False, "storage_used_bytes": 0}
+    try:
+        storage_used = library.get_storage_usage_bytes()
+    except (GoogleAPIError, DefaultCredentialsError) as exc:
+        logger.exception("Could not read cloud storage usage for church %s", church["id"])
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Le stockage Google Cloud est inaccessible. Vérifiez la facturation "
+                "du projet propriétaire du bucket et les droits du compte Google."
+            ),
+        ) from exc
+    storage_status = library.get_storage_status()
     return {
         "church": {
             "id": church["id"],
@@ -3593,7 +3672,9 @@ async def tenant_status(request: Request):
             "has_billing_subscription": bool(church.get("stripe_subscription_id")),
         },
         "is_admin": getattr(request.state, "tenant_role", None) == "admin",
-        "storage_used_bytes": library.get_storage_usage_bytes(),
+        "storage_used_bytes": storage_used,
+        "storage_backend": storage_status["backend"],
+        "storage_warning": storage_status["warning"],
     }
 
 
@@ -4431,5 +4512,17 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=True,
-        reload_excludes=[".venv/*", ".venv/**", "**/site-packages/**", "web/node_modules/**"],
+        reload_excludes=[
+            ".venv/*",
+            ".venv/**",
+            "**/site-packages/**",
+            "web/node_modules/**",
+            "uploads/*",
+            "uploads/**",
+            "output/*",
+            "output/**",
+            "library/*",
+            "library/**",
+            "web/dist/**",
+        ],
     )

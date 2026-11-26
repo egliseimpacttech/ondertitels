@@ -1,5 +1,6 @@
 """Library: store and organize files (VTT, MP3, MP4) with folders."""
 import json
+import logging
 import shutil
 import time
 import uuid
@@ -8,6 +9,8 @@ from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
+from google.api_core.exceptions import GoogleAPIError
+from google.auth.exceptions import GoogleAuthError
 from google.cloud import storage
 
 from .config import BASE_DIR, GCS_BUCKET_NAME, OUTPUT_DIR, UPLOAD_DIR
@@ -24,6 +27,8 @@ _storage_limit: ContextVar[int | None] = ContextVar("library_storage_limit", def
 
 _gcs_client: storage.Client | None = None
 _gcs_bucket: storage.Bucket | None = None
+_gcs_fallback_reason: str | None = None
+logger = logging.getLogger("ondertitels.library")
 
 
 class StorageLimitExceeded(Exception):
@@ -58,8 +63,52 @@ def _legacy_ministry_scope() -> bool:
     return _tenant_id.get() == LEGACY_TENANT_ID
 
 
-def _use_gcs() -> bool:
+def _gcs_configured() -> bool:
     return bool((GCS_BUCKET_NAME or "").strip())
+
+
+def _use_gcs() -> bool:
+    return _gcs_configured() and _gcs_fallback_reason is None
+
+
+def _disable_gcs_fallback(exc: Exception) -> None:
+    global _gcs_fallback_reason
+    if _gcs_fallback_reason is not None:
+        return
+    _gcs_fallback_reason = f"{type(exc).__name__}: {exc}"
+    logger.warning(
+        "Google Cloud Storage is unavailable; using local library storage for this process (%s).",
+        _gcs_fallback_reason,
+    )
+
+
+def get_storage_status() -> dict[str, str]:
+    if _gcs_fallback_reason is not None:
+        return {
+            "backend": "local_fallback",
+            "warning": (
+                "Google Cloud Storage is unavailable. New and updated library files are being "
+                "saved only on this server; files stored only in the cloud may be unavailable."
+            ),
+        }
+    if _gcs_configured():
+        return {"backend": "gcs", "warning": ""}
+    return {"backend": "local", "warning": ""}
+
+
+def is_gcs_active() -> bool:
+    return _use_gcs()
+
+
+def _local_file_path(file_id: str) -> Path:
+    file_path = _tenant_library_dir() / file_id
+    if not file_path.exists() and _legacy_ministry_scope():
+        return LIBRARY_DIR / file_id
+    return file_path
+
+
+def _is_gcs_error(exc: Exception) -> bool:
+    return isinstance(exc, (GoogleAPIError, GoogleAuthError))
 
 
 def _get_bucket() -> storage.Bucket:
@@ -83,11 +132,16 @@ def _file_blob_name(file_id: str) -> str:
 def file_storage_blob_name(file_id: str) -> str:
     blob_name = _file_blob_name(file_id)
     if _use_gcs() and _legacy_ministry_scope():
-        bucket = _get_bucket()
-        if not bucket.blob(blob_name).exists():
-            legacy_name = f"library/files/{file_id}"
-            if bucket.blob(legacy_name).exists():
-                return legacy_name
+        try:
+            bucket = _get_bucket()
+            if not bucket.blob(blob_name).exists():
+                legacy_name = f"library/files/{file_id}"
+                if bucket.blob(legacy_name).exists():
+                    return legacy_name
+        except Exception as exc:
+            if not _is_gcs_error(exc):
+                raise
+            _disable_gcs_fallback(exc)
     return blob_name
 
 
@@ -97,56 +151,92 @@ def _cinema_cover_blob_name(file_id: str) -> str:
 
 def upload_cinema_cover_from_path(file_id: str, jpeg_path: Path) -> None:
     """Persist Cinema cover JPEG to GCS when configured."""
-    if not _use_gcs():
-        return
-    blob = _get_bucket().blob(_cinema_cover_blob_name(file_id))
-    blob.upload_from_filename(str(jpeg_path), content_type="image/jpeg")
+    if _use_gcs():
+        try:
+            blob = _get_bucket().blob(_cinema_cover_blob_name(file_id))
+            blob.upload_from_filename(str(jpeg_path), content_type="image/jpeg")
+            return
+        except Exception as exc:
+            if not _is_gcs_error(exc):
+                raise
+            _disable_gcs_fallback(exc)
+    local_path = _tenant_library_dir() / "covers" / f"cinema_{file_id}.jpg"
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(jpeg_path, local_path)
 
 
 def download_cinema_cover_bytes(file_id: str) -> bytes | None:
     if not _use_gcs():
-        return None
-    bucket = _get_bucket()
-    blob = bucket.blob(_cinema_cover_blob_name(file_id))
-    if not blob.exists() and _legacy_ministry_scope():
-        blob = bucket.blob(f"library/covers/cinema_{file_id}.jpg")
-    if not blob.exists():
-        return None
-    return blob.download_as_bytes()
+        local_path = _tenant_library_dir() / "covers" / f"cinema_{file_id}.jpg"
+        return local_path.read_bytes() if local_path.is_file() else None
+    try:
+        bucket = _get_bucket()
+        blob = bucket.blob(_cinema_cover_blob_name(file_id))
+        if not blob.exists() and _legacy_ministry_scope():
+            blob = bucket.blob(f"library/covers/cinema_{file_id}.jpg")
+        if not blob.exists():
+            return None
+        return blob.download_as_bytes()
+    except Exception as exc:
+        if not _is_gcs_error(exc):
+            raise
+        _disable_gcs_fallback(exc)
+        local_path = _tenant_library_dir() / "covers" / f"cinema_{file_id}.jpg"
+        return local_path.read_bytes() if local_path.is_file() else None
 
 
 def delete_cinema_cover_gcs(file_id: str) -> None:
     if not _use_gcs():
+        local_path = _tenant_library_dir() / "covers" / f"cinema_{file_id}.jpg"
+        if local_path.exists():
+            local_path.unlink()
         return
-    bucket = _get_bucket()
-    blob = bucket.blob(_cinema_cover_blob_name(file_id))
-    if not blob.exists() and _legacy_ministry_scope():
-        blob = bucket.blob(f"library/covers/cinema_{file_id}.jpg")
-    if blob.exists():
-        blob.delete()
+    try:
+        bucket = _get_bucket()
+        blob = bucket.blob(_cinema_cover_blob_name(file_id))
+        if not blob.exists() and _legacy_ministry_scope():
+            blob = bucket.blob(f"library/covers/cinema_{file_id}.jpg")
+        if blob.exists():
+            blob.delete()
+    except Exception as exc:
+        if not _is_gcs_error(exc):
+            raise
+        _disable_gcs_fallback(exc)
+        local_path = _tenant_library_dir() / "covers" / f"cinema_{file_id}.jpg"
+        if local_path.exists():
+            local_path.unlink()
 
 
 def cinema_cover_exists_on_gcs(file_id: str) -> bool:
     if not _use_gcs():
-        return False
-    bucket = _get_bucket()
-    if bucket.blob(_cinema_cover_blob_name(file_id)).exists():
-        return True
-    return _legacy_ministry_scope() and bucket.blob(f"library/covers/cinema_{file_id}.jpg").exists()
+        return (_tenant_library_dir() / "covers" / f"cinema_{file_id}.jpg").is_file()
+    try:
+        bucket = _get_bucket()
+        if bucket.blob(_cinema_cover_blob_name(file_id)).exists():
+            return True
+        return _legacy_ministry_scope() and bucket.blob(f"library/covers/cinema_{file_id}.jpg").exists()
+    except Exception as exc:
+        if not _is_gcs_error(exc):
+            raise
+        _disable_gcs_fallback(exc)
+        return (_tenant_library_dir() / "covers" / f"cinema_{file_id}.jpg").is_file()
 
 
 def _read_file_bytes(file_id: str) -> bytes | None:
     if _use_gcs():
-        bucket = _get_bucket()
-        blob = bucket.blob(_file_blob_name(file_id))
-        if not blob.exists() and _legacy_ministry_scope():
-            blob = bucket.blob(f"library/files/{file_id}")
-        if not blob.exists():
-            return None
-        return blob.download_as_bytes()
-    file_path = _tenant_library_dir() / file_id
-    if not file_path.exists() and _legacy_ministry_scope():
-        file_path = LIBRARY_DIR / file_id
+        try:
+            bucket = _get_bucket()
+            blob = bucket.blob(_file_blob_name(file_id))
+            if not blob.exists() and _legacy_ministry_scope():
+                blob = bucket.blob(f"library/files/{file_id}")
+            if not blob.exists():
+                return None
+            return blob.download_as_bytes()
+        except Exception as exc:
+            if not _is_gcs_error(exc):
+                raise
+            _disable_gcs_fallback(exc)
+    file_path = _local_file_path(file_id)
     if not file_path.exists():
         return None
     return file_path.read_bytes()
@@ -154,8 +244,13 @@ def _read_file_bytes(file_id: str) -> bytes | None:
 
 def _write_file_bytes(file_id: str, data: bytes) -> None:
     if _use_gcs():
-        _get_bucket().blob(_file_blob_name(file_id)).upload_from_string(data)
-        return
+        try:
+            _get_bucket().blob(_file_blob_name(file_id)).upload_from_string(data)
+            return
+        except Exception as exc:
+            if not _is_gcs_error(exc):
+                raise
+            _disable_gcs_fallback(exc)
     folder = _tenant_library_dir()
     folder.mkdir(parents=True, exist_ok=True)
     (folder / file_id).write_bytes(data)
@@ -163,8 +258,13 @@ def _write_file_bytes(file_id: str, data: bytes) -> None:
 
 def _write_file_from_path(file_id: str, source_path: Path) -> None:
     if _use_gcs():
-        _get_bucket().blob(_file_blob_name(file_id)).upload_from_filename(str(source_path))
-        return
+        try:
+            _get_bucket().blob(_file_blob_name(file_id)).upload_from_filename(str(source_path))
+            return
+        except Exception as exc:
+            if not _is_gcs_error(exc):
+                raise
+            _disable_gcs_fallback(exc)
     folder = _tenant_library_dir()
     folder.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(str(source_path), str(folder / file_id))
@@ -173,21 +273,20 @@ def _write_file_from_path(file_id: str, source_path: Path) -> None:
 def _delete_file_storage(file_id: str) -> None:
     """Remove file bytes from GCS or disk, plus Cinema cover and local caches."""
     if _use_gcs():
-        bucket = _get_bucket()
-        blob = bucket.blob(_file_blob_name(file_id))
-        if not blob.exists() and _legacy_ministry_scope():
-            blob = bucket.blob(f"library/files/{file_id}")
-        if blob.exists():
-            blob.delete()
-        # Cinema poster for this video (same id as library file)
         try:
+            bucket = _get_bucket()
+            blob = bucket.blob(_file_blob_name(file_id))
+            if not blob.exists() and _legacy_ministry_scope():
+                blob = bucket.blob(f"library/files/{file_id}")
+            if blob.exists():
+                blob.delete()
             delete_cinema_cover_gcs(file_id)
-        except Exception:
-            pass
-    else:
-        p = _tenant_library_dir() / file_id
-        if not p.exists() and _legacy_ministry_scope():
-            p = LIBRARY_DIR / file_id
+        except Exception as exc:
+            if not _is_gcs_error(exc):
+                raise
+            _disable_gcs_fallback(exc)
+    if not _use_gcs():
+        p = _local_file_path(file_id)
         if p.exists():
             p.unlink()
     cache_path = LIBRARY_CACHE_DIR / (_tenant_id.get() or "default") / file_id
@@ -210,13 +309,18 @@ def _delete_file_storage(file_id: str) -> None:
 def _load_index() -> Dict[str, Any]:
     """Load the library index (folder structure and file metadata)."""
     if _use_gcs():
-        bucket = _get_bucket()
-        blob = bucket.blob(_index_blob_name())
-        if not blob.exists() and _legacy_ministry_scope():
-            blob = bucket.blob("library/index.json")
-        if blob.exists():
-            return json.loads(blob.download_as_text(encoding="utf-8"))
-        return {"folders": {}, "files": {}}
+        try:
+            bucket = _get_bucket()
+            blob = bucket.blob(_index_blob_name())
+            if not blob.exists() and _legacy_ministry_scope():
+                blob = bucket.blob("library/index.json")
+            if blob.exists():
+                return json.loads(blob.download_as_text(encoding="utf-8"))
+            return {"folders": {}, "files": {}}
+        except Exception as exc:
+            if not _is_gcs_error(exc):
+                raise
+            _disable_gcs_fallback(exc)
     tenant_index = _tenant_library_dir() / "index.json"
     if tenant_index.exists():
         return json.loads(tenant_index.read_text(encoding="utf-8"))
@@ -231,11 +335,16 @@ def _save_index(index: Dict[str, Any]) -> None:
     """Save the library index."""
     payload = json.dumps(index, indent=2, ensure_ascii=False)
     if _use_gcs():
-        _get_bucket().blob(_index_blob_name()).upload_from_string(
-            payload,
-            content_type="application/json; charset=utf-8",
-        )
-        return
+        try:
+            _get_bucket().blob(_index_blob_name()).upload_from_string(
+                payload,
+                content_type="application/json; charset=utf-8",
+            )
+            return
+        except Exception as exc:
+            if not _is_gcs_error(exc):
+                raise
+            _disable_gcs_fallback(exc)
     if not _tenant_id.get():
         LIBRARY_INDEX.write_text(payload, encoding="utf-8")
         return
@@ -395,19 +504,22 @@ def get_file_path(file_id: str) -> Optional[tuple[Path, str]]:
         return None
     file_info = index["files"][file_id]
     if _use_gcs():
-        blob = _get_bucket().blob(_file_blob_name(file_id))
-        if not blob.exists() and _legacy_ministry_scope():
-            blob = _get_bucket().blob(f"library/files/{file_id}")
-        if not blob.exists():
-            return None
-        cache_dir = LIBRARY_CACHE_DIR / (_tenant_id.get() or "default")
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        local_path = cache_dir / file_id
-        blob.download_to_filename(str(local_path))
-        return local_path, file_info["name"]
-    file_path = _tenant_library_dir() / file_id
-    if not file_path.exists() and _legacy_ministry_scope():
-        file_path = LIBRARY_DIR / file_id
+        try:
+            blob = _get_bucket().blob(_file_blob_name(file_id))
+            if not blob.exists() and _legacy_ministry_scope():
+                blob = _get_bucket().blob(f"library/files/{file_id}")
+            if not blob.exists():
+                return None
+            cache_dir = LIBRARY_CACHE_DIR / (_tenant_id.get() or "default")
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            local_path = cache_dir / file_id
+            blob.download_to_filename(str(local_path))
+            return local_path, file_info["name"]
+        except Exception as exc:
+            if not _is_gcs_error(exc):
+                raise
+            _disable_gcs_fallback(exc)
+    file_path = _local_file_path(file_id)
     if not file_path.exists():
         return None
     return file_path, file_info["name"]

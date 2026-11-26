@@ -7,15 +7,38 @@
     <title>Ondertitels — Sous-titres automatiques</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/brand-logo.svg" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #0a1f16;
+      }
+    </style>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap"
       rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
     />
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div
+        style="
+          min-height: 100vh;
+          margin: 0;
+          display: grid;
+          place-items: center;
+          background: #0a1f16;
+          color: #fff;
+          font-family: system-ui, sans-serif;
+        "
+      >
+        Ondertitels
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

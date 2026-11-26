@@ -11,3 +11,4 @@ firebase OK
 ondertitels downloaden of in de bib zetten 
 -> dan ook een melding krijgen dat het geslaagd is 
 wachtwoord moet zichtbaar zijn met eenoogje
+bij een account aanmaken wordt er een verificatiecode aangemaakt: er moet ook een melding op het scherm komen dat ze een mail zullen sturen 

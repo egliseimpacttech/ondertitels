@@ -11,7 +11,7 @@ function formatStorage(bytes: number) {
 }
 
 export function AdminPage() {
-  const { church, isAdmin, storageUsedBytes, refreshAccessFlags } = useAuth();
+  const { church, isAdmin, storageUsedBytes, storageWarning, refreshAccessFlags } = useAuth();
   const location = useLocation();
   const [email, setEmail] = useState('');
   const [members, setMembers] = useState<Member[]>([]);
@@ -131,6 +131,7 @@ export function AdminPage() {
   return (
     <div className="page">
       <h1 style={{ marginTop: 0 }}>Administration</h1>
+      {storageWarning ? <div className="message">{storageWarning}</div> : null}
       <section className="panel">
         <div className="panel-title">{church.name}</div>
         <p>

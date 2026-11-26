@@ -31,7 +31,7 @@ Roles typically needed:
 - **Signed URL fallback** (IAM signBlob): `roles/iam.serviceAccountTokenCreator` on the runtime service account
 - **Firebase Admin invite endpoint** (`/api/admin/invite`): `roles/firebaseauth.admin` (only needed if you use the Admin screen)
 
-Enable Firestore in Native mode in the same project (or configure the Firebase project used by the app). Church membership and Stripe subscription state are stored there.
+Enable Firestore in Native mode in the same project (or configure the Firebase project used by the app). Church memberships and Stripe subscription state are stored there; the designated Ministère Apostolique Impact administrator is mapped directly from the verified `kaat.dbolle@gmail.com` account.
 
 ### 3) Create the GCS bucket (if you use large uploads)
 
@@ -83,7 +83,7 @@ To see which models the running revision actually uses (no secrets), call **`GET
 Notes:
 
 - **Do not commit** real keys to the repo. Prefer Cloud Run **Secrets** instead of `--set-env-vars` for API keys.
-- If you don’t need GCS (small files, local use), you can leave `GCS_BUCKET_NAME` empty; large uploads in production will then fail.
+- If GCS is unavailable, the library falls back to tenant-scoped local disk storage for the current process. This is not a second backup: cloud-only files may be unavailable, and Cloud Run local disk is ephemeral. Large uploads use direct server upload while local fallback is active and remain subject to Cloud Run request limits.
 
 ### 5) Configure Stripe billing
 
