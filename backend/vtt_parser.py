@@ -9,11 +9,16 @@ def parse_vtt(vtt_path: Path) -> List[Dict[str, Any]]:
     Parse a VTT file and return list of segments:
     [{"start": float, "end": float, "text": str}, ...]
     """
-    content = vtt_path.read_text(encoding="utf-8")
+    return parse_vtt_content(vtt_path.read_text(encoding="utf-8-sig"))
+
+
+def parse_vtt_content(content: str) -> List[Dict[str, Any]]:
+    """Parse WebVTT content, including files using Windows line endings."""
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
     segments: List[Dict[str, Any]] = []
 
     # Split into cue blocks (separated by blank lines)
-    blocks = re.split(r"\n\n+", content.strip())
+    blocks = re.split(r"\n[ \t]*\n+", content.strip())
 
     for block in blocks:
         lines = block.strip().split("\n")

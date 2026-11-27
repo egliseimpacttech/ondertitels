@@ -41,7 +41,7 @@ Web app to generate **WebVTT subtitles** from sermon audio/video, translate to m
 - The administrator can invite authorized email addresses and manage billing from Administration.
 - New accounts must verify their email before they can access a church workspace.
 - `kaat.dbolle@gmail.com` receives the free **Ministère Apostolique Impact** workspace with unlimited storage.
-- Church memberships, roles, and subscription state are stored in Firestore. The designated ministry administrator is mapped directly from the verified `kaat.dbolle@gmail.com` account. Files and library indexes use separate church-specific storage prefixes. The previous shared library remains available to the ministry workspace.
+- Church memberships, roles, and subscription state are stored in Firestore. The designated ministry administrator is mapped directly from the verified `kaat.dbolle@gmail.com` account. Files and library indexes use separate church-specific storage prefixes. The previous shared library remains available to the ministry workspace; its index is merged into the ministry's church-specific index once, which is then the canonical index. The legacy index is retained as a backup.
 - If a configured Google Cloud Storage bucket is unavailable, the backend switches to tenant-scoped local disk storage for the current process and reports this in Administration. This is a fallback, not a second backup: cloud-only files may be unavailable, and local disk on Cloud Run is ephemeral.
 - The backend requires a valid Firebase membership and active subscription for paid church features; hiding screens in the frontend is not used as the access control.
 

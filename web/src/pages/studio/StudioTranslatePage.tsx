@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Languages } from 'lucide-react';
 import { StudioPageShell } from '@/components/studio/StudioPageShell';
 import { FileSourcePicker } from '@/components/ui/FileSourcePicker';
@@ -7,19 +7,42 @@ import { Button } from '@/components/ui/Button';
 import { JobResult } from '@/components/ui/JobResult';
 import { LibPickerModal } from '@/components/library/LibPickerModal';
 import { downloadViaApi } from '@/lib/api';
-import { runJob, type JobProgress } from '@/lib/jobs';
+import {
+  readJobProgress,
+  resumeJob,
+  runJob,
+  subscribeJobProgress,
+  type JobProgress,
+} from '@/lib/jobs';
 import { resolveAsFile, saveJobToLibrary } from '@/lib/studio';
 import type { FileSource } from '@/types';
+import { useAuth } from '@/context/AuthContext';
 
 export function StudioTranslatePage() {
+  const { user } = useAuth();
   const [file, setFile] = useState<FileSource | null>(null);
   const [langs, setLangs] = useState<string[]>(['nl', 'en']);
   const [progress, setProgress] = useState<JobProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const persistenceKey = user ? `translation:${user.uid}` : null;
+
+  useEffect(() => {
+    if (!user || !persistenceKey) return;
+    const handleProgress = (next: JobProgress | null) => {
+      setProgress(next);
+      setBusy(next?.phase === 'uploading' || next?.phase === 'running');
+      setError(next?.phase === 'error' ? next.message : null);
+    };
+    handleProgress(readJobProgress(persistenceKey));
+    const unsubscribe = subscribeJobProgress(persistenceKey, handleProgress);
+    resumeJob(persistenceKey, user.uid, (next) => handleProgress(next));
+    return unsubscribe;
+  }, [persistenceKey, user]);
 
   async function handleTranslate() {
+    if (busy) return;
     if (!file) {
       setError('Sélectionnez un fichier VTT ou TXT.');
       return;
@@ -42,6 +65,8 @@ export function StudioTranslatePage() {
         downloadName: isTxt ? 'translated.txt' : 'translated.vtt',
         resultUrlSuffix: isTxt ? '.txt' : '.vtt',
         saveMeta: { inputFileName: inputName, librarySuffix: 'translated' },
+        persistenceKey: persistenceKey || undefined,
+        ownerUid: user?.uid,
         onProgress: setProgress,
       });
     } catch (e) {

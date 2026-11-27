@@ -96,12 +96,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let unsub = () => {};
+    let authChangeId = 0;
+    let disposed = false;
     void (async () => {
       await firebaseAuthReady;
+      if (disposed) return;
       unsub = onAuthStateChanged(auth, async (u) => {
+        const changeId = ++authChangeId;
+        setReady(false);
         setUser(u);
-        if (u) await refreshAccessFlags();
-        else {
+        if (u) {
+          try {
+            await u.getIdToken(true);
+            if (changeId !== authChangeId || auth.currentUser?.uid !== u.uid) return;
+            await refreshAccessFlags();
+          } catch (e) {
+            if (changeId === authChangeId) {
+              setAccessError(
+                e instanceof Error ? e.message : 'Impossible de vérifier l’accès à votre espace.',
+              );
+            }
+          }
+        } else {
           setIsAdmin(false);
           setCinemaOnly(false);
           setChurch(null);
@@ -110,10 +126,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setStorageWarning('');
           setAccessError(null);
         }
-        setReady(true);
+        if (changeId === authChangeId) setReady(true);
       });
     })();
-    return () => unsub();
+    return () => {
+      disposed = true;
+      authChangeId += 1;
+      unsub();
+    };
   }, [refreshAccessFlags]);
 
   const value = useMemo<AuthContextValue>(

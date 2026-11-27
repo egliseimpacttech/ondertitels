@@ -111,6 +111,16 @@ def _is_gcs_error(exc: Exception) -> bool:
     return isinstance(exc, (GoogleAPIError, GoogleAuthError))
 
 
+def _merge_legacy_index(index: Dict[str, Any], legacy_index: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy missing legacy entries into the per-church index without replacing newer entries."""
+    for collection in ("folders", "files"):
+        target = index.setdefault(collection, {})
+        for item_id, item in legacy_index.get(collection, {}).items():
+            target.setdefault(item_id, item)
+    index["_legacy_index_migrated"] = True
+    return index
+
+
 def _get_bucket() -> storage.Bucket:
     global _gcs_client, _gcs_bucket
     if _gcs_bucket is not None:
@@ -312,21 +322,49 @@ def _load_index() -> Dict[str, Any]:
         try:
             bucket = _get_bucket()
             blob = bucket.blob(_index_blob_name())
-            if not blob.exists() and _legacy_ministry_scope():
-                blob = bucket.blob("library/index.json")
-            if blob.exists():
-                return json.loads(blob.download_as_text(encoding="utf-8"))
-            return {"folders": {}, "files": {}}
+            index = (
+                json.loads(blob.download_as_text(encoding="utf-8"))
+                if blob.exists()
+                else {"folders": {}, "files": {}}
+            )
+            if _legacy_ministry_scope() and not index.get("_legacy_index_migrated"):
+                legacy_blob = bucket.blob("library/index.json")
+                legacy_index = (
+                    json.loads(legacy_blob.download_as_text(encoding="utf-8"))
+                    if legacy_blob.exists()
+                    else {"folders": {}, "files": {}}
+                )
+                index = _merge_legacy_index(index, legacy_index)
+                blob.upload_from_string(
+                    json.dumps(index, indent=2, ensure_ascii=False),
+                    content_type="application/json; charset=utf-8",
+                )
+            return index
         except Exception as exc:
             if not _is_gcs_error(exc):
                 raise
             _disable_gcs_fallback(exc)
+    if _legacy_ministry_scope():
+        tenant_index = _tenant_library_dir() / "index.json"
+        index = (
+            json.loads(tenant_index.read_text(encoding="utf-8"))
+            if tenant_index.exists()
+            else {"folders": {}, "files": {}}
+        )
+        if index.get("_legacy_index_migrated"):
+            return index
+        legacy_index = (
+            json.loads(LIBRARY_INDEX.read_text(encoding="utf-8"))
+            if LIBRARY_INDEX.exists()
+            else {"folders": {}, "files": {}}
+        )
+        index = _merge_legacy_index(index, legacy_index)
+        _save_index(index)
+        return index
     tenant_index = _tenant_library_dir() / "index.json"
     if tenant_index.exists():
         return json.loads(tenant_index.read_text(encoding="utf-8"))
     if not _tenant_id.get() and LIBRARY_INDEX.exists():
-        return json.loads(LIBRARY_INDEX.read_text(encoding="utf-8"))
-    if _legacy_ministry_scope() and LIBRARY_INDEX.exists():
         return json.loads(LIBRARY_INDEX.read_text(encoding="utf-8"))
     return {"folders": {}, "files": {}}
 

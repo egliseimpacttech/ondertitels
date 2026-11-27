@@ -4,6 +4,7 @@ import html
 import json
 import logging
 import mimetypes
+import re
 import subprocess
 import shutil
 import threading
@@ -54,7 +55,7 @@ from backend.local_asr import local_asr_available, local_transcribe_file, warm_l
 from backend.local_translate import local_translate_available, local_translate_text, ollama_available
 from backend.translation import translate_segments
 from backend.vtt_generator import generate_vtt
-from backend.vtt_parser import parse_vtt
+from backend.vtt_parser import parse_vtt, parse_vtt_content
 from backend import library
 from backend import burn
 from backend import billing, tenants
@@ -1131,7 +1132,7 @@ def _run_txt_translation_only(
     """Translate a plain-text file (paragraphs separated by blank lines) to selected languages."""
     try:
         on_progress(5, "Reading text file…", None)
-        text = txt_path.read_text(encoding="utf-8")
+        text = txt_path.read_text(encoding="utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
         if not text.strip():
             set_job_progress(job_id, {"progress": 0, "message": "Empty file.", "done": True, "error": "File is empty."})
             return
@@ -2801,6 +2802,59 @@ async def translate_vtt(
     if suffix not in (".vtt", ".txt"):
         raise HTTPException(400, "Only VTT or TXT files allowed.")
 
+    lang_codes = list(dict.fromkeys(x.strip().lower() for x in languages.split(",") if x.strip()))
+    if not lang_codes:
+        raise HTTPException(400, "Select at least one target language.")
+    allowed = set(config.TARGET_LANGUAGES)
+    invalid_langs = [code for code in lang_codes if code not in allowed]
+    if invalid_langs:
+        raise HTTPException(
+            400,
+            f"Unsupported languages: {', '.join(invalid_langs)}. Supported: {', '.join(sorted(allowed))}",
+        )
+
+    unavailable = []
+    for lang in lang_codes:
+        if lang in config.DEEPL_LANGUAGES:
+            has_provider = bool(config.DEEPL_API_KEY or config.OPENAI_API_KEY)
+        else:
+            has_provider = bool(config.OPENAI_API_KEY)
+        if not has_provider:
+            unavailable.append(config.TARGET_LANGUAGES[lang])
+    if unavailable:
+        raise HTTPException(
+            503,
+            "No translation provider is configured for: " + ", ".join(unavailable) + ".",
+        )
+
+    max_bytes = config.MAX_UPLOAD_BYTES
+    content = bytearray()
+    while chunk := await file.read(1024 * 1024):
+        content.extend(chunk)
+        if max_bytes is not None and len(content) > max_bytes:
+            raise HTTPException(413, f"File too large. Maximum size is {max_bytes // (1024 * 1024)}MB.")
+    try:
+        text = bytes(content).decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(400, "The subtitle file must be valid UTF-8.") from exc
+    if "\x00" in text:
+        raise HTTPException(400, "The subtitle file contains invalid null characters.")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    if suffix == ".vtt":
+        segments = parse_vtt_content(text)
+        if not segments:
+            raise HTTPException(400, "No valid subtitle cues were found in the VTT file.")
+        cue_blocks = [
+            block
+            for block in re.split(r"\n[ \t]*\n+", text.strip())
+            if "-->" in block
+        ]
+        if len(segments) != len(cue_blocks):
+            raise HTTPException(400, "One or more subtitle cues are malformed or have no text.")
+    elif not text.strip():
+        raise HTTPException(400, "The TXT file is empty.")
+
     job_id = str(uuid.uuid4())
     if suffix == ".vtt":
         upload_path = config.UPLOAD_DIR / f"{job_id}.vtt"
@@ -2810,8 +2864,8 @@ async def translate_vtt(
         out_path = config.OUTPUT_DIR / f"{job_id}.txt"
 
     try:
-        with upload_path.open("wb") as f:
-            shutil.copyfileobj(file.file, f)
+        upload_path.parent.mkdir(parents=True, exist_ok=True)
+        upload_path.write_text(text, encoding="utf-8")
     except Exception as e:
         raise HTTPException(500, f"Upload failed: {e}")
 
@@ -2825,9 +2879,6 @@ async def translate_vtt(
         })
 
     set_job_progress(job_id, {"progress": 0, "message": "Starting…", "done": False, "error": None, "eta_seconds": None})
-    lang_codes = [x.strip().lower() for x in languages.split(",") if x.strip()]
-    allowed = set(config.TARGET_LANGUAGES)
-    lang_codes = [c for c in lang_codes if c in allowed] or ["en"]
 
     if suffix == ".vtt":
         asyncio.create_task(asyncio.to_thread(_run_translation_only, job_id, upload_path, out_path, lang_codes, on_progress))

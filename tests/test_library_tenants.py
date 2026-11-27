@@ -133,4 +133,75 @@ def test_ministry_keeps_access_to_the_legacy_library(local_library):
         assert library.get_file(legacy_file_id) == (b"legacy", "legacy.txt")
         library.upload_file(b"new", "new.txt")
 
-    assert (library.LIBRARY_DIR / library.LEGACY_TENANT_ID / "index.json").exists()
+    tenant_index_path = library.LIBRARY_DIR / library.LEGACY_TENANT_ID / "index.json"
+    assert tenant_index_path.exists()
+    tenant_index = json.loads(tenant_index_path.read_text(encoding="utf-8"))
+    assert legacy_file_id in tenant_index["files"]
+    assert tenant_index["_legacy_index_migrated"] is True
+    assert any(info["name"] == "new.txt" for info in tenant_index["files"].values())
+
+    tenant_index["files"].pop(legacy_file_id)
+    tenant_index_path.write_text(json.dumps(tenant_index), encoding="utf-8")
+    with library.tenant_scope(library.LEGACY_TENANT_ID, None):
+        assert library.get_file(legacy_file_id) is None
+
+
+def test_ministry_migrates_legacy_gcs_index_to_tenant_index(local_library, monkeypatch):
+    legacy_index = json.dumps(
+        {
+            "folders": {},
+            "files": {
+                "legacy-file-id": {
+                    "name": "legacy.txt",
+                    "type": "text",
+                    "folder": "",
+                    "size": 6,
+                }
+            },
+        }
+    )
+    tenant_index_name = "churches/ministere-apostolique-impact/library/index.json"
+    tenant_only_index = {
+        "folders": {},
+        "files": {
+            "tenant-file-id": {
+                "name": "tenant.txt",
+                "type": "text",
+                "folder": "",
+                "size": 6,
+            }
+        },
+    }
+    stored = {
+        "library/index.json": legacy_index,
+        tenant_index_name: json.dumps(tenant_only_index),
+    }
+
+    class Blob:
+        def __init__(self, name):
+            self.name = name
+
+        def exists(self):
+            return self.name in stored
+
+        def download_as_text(self, encoding):
+            return stored[self.name]
+
+        def upload_from_string(self, content, content_type):
+            stored[self.name] = content
+
+    class Bucket:
+        def blob(self, name):
+            return Blob(name)
+
+    monkeypatch.setattr(library, "GCS_BUCKET_NAME", "test-bucket")
+    monkeypatch.setattr(library, "_get_bucket", lambda: Bucket())
+
+    with library.tenant_scope(library.LEGACY_TENANT_ID, None):
+        file_ids = {item["id"] for item in library.list_folder()["files"]}
+        assert file_ids == {"legacy-file-id", "tenant-file-id"}
+
+    migrated_index = json.loads(stored[tenant_index_name])
+    assert set(migrated_index["files"]) == {"legacy-file-id", "tenant-file-id"}
+    assert migrated_index["_legacy_index_migrated"] is True
+    assert stored["library/index.json"] == legacy_index

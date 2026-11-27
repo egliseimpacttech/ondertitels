@@ -193,6 +193,35 @@ body.cinema-mode .app-header {
   border-bottom-color: rgba(255, 255, 255, 0.08);
 }
 
+.background-job-banner {
+  position: sticky;
+  top: var(--header-h);
+  z-index: 90;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 9px 16px;
+  color: #145a40;
+  background: #e8f5ee;
+  border-bottom: 1px solid rgba(20, 90, 64, 0.16);
+  font-size: 0.85rem;
+}
+
+.background-job-banner a {
+  color: inherit;
+  font-weight: 750;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+body.cinema-mode .background-job-banner {
+  color: #d7f5e5;
+  background: #10251c;
+  border-bottom-color: rgba(215, 245, 229, 0.16);
+}
+
 .header-inner {
   width: min(1280px, calc(100% - 32px));
   margin: 0 auto;

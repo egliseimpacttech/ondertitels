@@ -17,6 +17,12 @@ import {
 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { STUDIO_TOOLS } from '@/lib/studio';
+import {
+  readJobProgress,
+  resumeJob,
+  subscribeJobProgress,
+  type JobProgress,
+} from '@/lib/jobs';
 import { VIEW_PATHS, type AppView } from '@/types';
 import { Button } from '@/components/ui/Button';
 
@@ -48,9 +54,12 @@ function userInitials(email?: string | null) {
 export function AppShell({ children, cinemaMode }: { children: ReactNode; cinemaMode?: boolean }) {
   const { cinemaOnly, isAdmin, signOutUser, user } = useAuth();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [translationProgress, setTranslationProgress] = useState<JobProgress | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
   const drawerTitleId = useId();
+  const userUid = user?.uid;
+  const translationJobKey = userUid ? `translation:${userUid}` : null;
 
   useEffect(() => {
     document.body.classList.toggle('cinema-mode', !!cinemaMode);
@@ -60,6 +69,19 @@ export function AppShell({ children, cinemaMode }: { children: ReactNode; cinema
   useEffect(() => {
     setDrawerOpen(false);
   }, [location.pathname, cinemaMode]);
+
+  useEffect(() => {
+    if (!translationJobKey || !userUid) {
+      setTranslationProgress(null);
+      return;
+    }
+
+    const handleProgress = (progress: JobProgress | null) => setTranslationProgress(progress);
+    handleProgress(readJobProgress(translationJobKey));
+    const unsubscribe = subscribeJobProgress(translationJobKey, handleProgress);
+    resumeJob(translationJobKey, userUid, handleProgress);
+    return unsubscribe;
+  }, [translationJobKey, userUid]);
 
   useEffect(() => {
     if (!drawerOpen) return;
@@ -165,6 +187,15 @@ export function AppShell({ children, cinemaMode }: { children: ReactNode; cinema
           </div>
         </div>
       </header>
+
+      {translationProgress?.phase === 'running' && location.pathname !== '/accueil/traduire' ? (
+        <div className="background-job-banner" role="status" aria-live="polite">
+          <span>
+            Traduction en cours — {translationProgress.message}
+          </span>
+          <NavLink to="/accueil/traduire">Voir le résultat</NavLink>
+        </div>
+      ) : null}
 
       <div className={`drawer-root ${drawerOpen ? 'open' : ''}`} aria-hidden={!drawerOpen}>
         <button
